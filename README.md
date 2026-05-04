@@ -103,7 +103,6 @@ python -m pytest -q
 
 ## 6) 최근 작업 로그
 
-### 2026-05-04
 
 1) `event_classifier.py` 1차 구현 완료
 - 분류 우선순위:

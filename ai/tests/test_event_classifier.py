@@ -76,3 +76,27 @@ def test_repeated_vibration_not_triggered_by_raw_influx_without_meaningful_count
     )
     result = classify_event(event)
     assert result.event_type != "repeated_vibration"
+
+
+def test_airborne_threshold_differs_between_day_and_night() -> None:
+    # 41dB is below day airborne(45) but above night airborne(40).
+    day_event = _event(41.0, 100, 1200, "2026-05-04T21:30:00+09:00")
+    night_event = _event(41.0, 100, 3200, "2026-05-04T23:30:00+09:00")
+
+    day_result = classify_event(day_event)
+    night_result = classify_event(night_event)
+
+    assert day_result.event_type == "background_noise"
+    assert night_result.event_type == "daily_noise"
+
+
+def test_impact_lmax_threshold_differs_between_day_and_night() -> None:
+    # 53dB + strong vibration: night(>=52) can be impact, day(<57) should not.
+    day_event = _event(53.0, 700, 6000, "2026-05-04T14:30:00+09:00", accel_delta=0.2)
+    night_event = _event(53.0, 700, 6000, "2026-05-04T23:30:00+09:00", accel_delta=0.2)
+
+    day_result = classify_event(day_event)
+    night_result = classify_event(night_event)
+
+    assert day_result.event_type != "impact_noise"
+    assert night_result.event_type == "impact_noise"

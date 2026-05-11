@@ -118,6 +118,22 @@ class AnalyzeRequestIn(BaseModel):
     situation_description: str | None = None
 
 
+class ClassifyEventRequestIn(BaseModel):
+    sensor_id: str
+    source: str = "backend"
+    household_id: int | None = None
+    event_feature: AnalyzeEventFeatureIn
+    recent_meaningful_events_10min: list[AnalyzeNoiseEventIn] = Field(default_factory=list)
+
+
+class AnalyzePatternsRequestIn(BaseModel):
+    household_id: int
+    analysis_period_days: int = Field(default=7, ge=1, le=90)
+    reference_time: datetime | None = None
+    noise_events: list[AnalyzeNoiseEventIn] = Field(default_factory=list)
+    mediation_messages: list[AnalyzeMediationMessageIn] = Field(default_factory=list)
+
+
 def _parse_dt(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
@@ -536,6 +552,46 @@ def _count_recent_meaningful_events(
     return count
 
 
+def _build_event_features(
+    *,
+    sensor_id: str,
+    source: str,
+    feature_in: AnalyzeEventFeatureIn,
+    fallback_timestamp: datetime | None = None,
+    recent_context_events: list[dict[str, Any]] | None = None,
+) -> tuple[datetime, EventFeatures]:
+    sensor_ts = _to_naive_utc(feature_in.timestamp or fallback_timestamp or datetime.now(timezone.utc))
+    recent_count_10min = (
+        int(feature_in.recent_count_10min)
+        if feature_in.recent_count_10min is not None
+        else _count_recent_meaningful_events(recent_context_events or [], sensor_ts)
+    )
+    event_features = EventFeatures(
+        device_id=sensor_id,
+        source=source,
+        sound_level=float(feature_in.sound_level),
+        vibration_value=int(feature_in.vibration_value),
+        duration_ms=int(feature_in.duration_ms or 0),
+        accel_delta=float(feature_in.accel_delta),
+        timestamp=sensor_ts,
+        recent_count_10min=recent_count_10min,
+    )
+    return sensor_ts, event_features
+
+
+def _count_high_or_critical_in_window(
+    noise_events: list[dict[str, Any]],
+    reference_time: datetime,
+    period_days: int,
+) -> int:
+    start = reference_time - timedelta(days=period_days)
+    return sum(
+        1
+        for row in noise_events
+        if start <= row["detected_at"] <= reference_time and row["severity"] in {"high", "critical"}
+    )
+
+
 def create_dashboard_app() -> FastAPI:
     app = FastAPI(title="KoongLog AI Dashboard API", version="0.1.0")
 
@@ -552,6 +608,68 @@ def create_dashboard_app() -> FastAPI:
             "mediation_table": schema.mediation_table,
         }
 
+    @app.post("/api/v1/ai/classify-event")
+    def classify_event_api(payload: ClassifyEventRequestIn) -> dict[str, Any]:
+        settings = get_settings()
+        recent_context_events = _normalize_noise_events(payload.recent_meaningful_events_10min)
+        sensor_ts, event_features = _build_event_features(
+            sensor_id=payload.sensor_id,
+            source=payload.source,
+            feature_in=payload.event_feature,
+            recent_context_events=recent_context_events,
+        )
+        classification = classify_event(event=event_features, settings=settings)
+        return {
+            "status": "success",
+            "classification": {
+                "sensor_id": payload.sensor_id,
+                "household_id": payload.household_id,
+                "event_type": classification.event_type,
+                "severity": classification.severity,
+                "severity_score": classification.severity_score,
+                "confidence": classification.confidence,
+                "is_night": classification.is_night,
+                "is_meaningful": classification.is_meaningful,
+                "timestamp": sensor_ts.isoformat(),
+            },
+        }
+
+    @app.post("/api/v1/ai/analyze-patterns")
+    def analyze_patterns_api(payload: AnalyzePatternsRequestIn) -> dict[str, Any]:
+        reference_time = _to_naive_utc(payload.reference_time or datetime.now(timezone.utc))
+        noise_events = _normalize_noise_events(payload.noise_events)
+        mediation_messages = [
+            {"created_at": _to_naive_utc(row.created_at)}
+            for row in payload.mediation_messages
+        ]
+        pattern_obj = analyze_patterns(
+            household_id=payload.household_id,
+            noise_events=noise_events,
+            mediation_messages=mediation_messages,
+            analysis_period_days=payload.analysis_period_days,
+            reference_time=reference_time,
+        )
+        pattern_result = {
+            "household_id": pattern_obj.household_id,
+            "period_days": pattern_obj.analysis_period_days,
+            "total_count": pattern_obj.total_events,
+            "night_count": pattern_obj.night_events,
+            "high_count": _count_high_or_critical_in_window(
+                noise_events=noise_events,
+                reference_time=reference_time,
+                period_days=payload.analysis_period_days,
+            ),
+            "recent_count_10min": _count_recent_meaningful_events(noise_events, reference_time),
+            "repeated_days": pattern_obj.repeated_days,
+            "max_events_in_10min": pattern_obj.max_events_in_10min,
+            "pattern_label": pattern_obj.pattern_label,
+            "needs_mediation": pattern_obj.needs_mediation,
+            "needs_escalation": pattern_obj.needs_escalation,
+            "post_mediation_recurrence": pattern_obj.post_mediation_recurrence,
+            "summary": pattern_obj.summary,
+        }
+        return {"status": "success", "pattern_result": pattern_result}
+
     @app.post("/api/v1/ai/analyze")
     @app.post("/api/v1/sensor-readings")
     def analyze_ai(payload: AnalyzeRequestIn) -> dict[str, Any]:
@@ -564,22 +682,12 @@ def create_dashboard_app() -> FastAPI:
             recent_context_events.extend(_normalize_noise_events(payload.recent_noise_logs))
 
         if payload.event_feature is not None:
-            feature_in = payload.event_feature
-            sensor_ts = _to_naive_utc(feature_in.timestamp or payload.timestamp or datetime.now(timezone.utc))
-            recent_count_10min = (
-                int(feature_in.recent_count_10min)
-                if feature_in.recent_count_10min is not None
-                else _count_recent_meaningful_events(recent_context_events, sensor_ts)
-            )
-            event_features = EventFeatures(
-                device_id=payload.sensor_id,
+            sensor_ts, event_features = _build_event_features(
+                sensor_id=payload.sensor_id,
                 source=payload.source,
-                sound_level=float(feature_in.sound_level),
-                vibration_value=int(feature_in.vibration_value),
-                duration_ms=int(feature_in.duration_ms or 0),
-                accel_delta=float(feature_in.accel_delta),
-                timestamp=sensor_ts,
-                recent_count_10min=recent_count_10min,
+                feature_in=payload.event_feature,
+                fallback_timestamp=payload.timestamp,
+                recent_context_events=recent_context_events,
             )
         else:
             if payload.sound_level is None or payload.vibration_value is None:

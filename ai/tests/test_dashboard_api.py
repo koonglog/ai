@@ -447,3 +447,86 @@ def test_analyze_route_uses_noise_events_only_for_7day_analysis(monkeypatch) -> 
     body = res.json()
     assert body["pattern_result"]["period_days"] == 7
     assert body["pattern_result"]["total_count"] == 1
+
+
+def test_classify_event_route(monkeypatch) -> None:
+    db_url = _new_db_url()
+    monkeypatch.setenv("BACKEND_DB_URL", db_url)
+    _seed_db(db_url)
+    client = _build_client(db_url)
+
+    now = datetime.now()
+    payload = {
+        "sensor_id": "SENSOR-A101-01",
+        "household_id": 1,
+        "source": "backend",
+        "event_feature": {
+            "sound_level": 58.2,
+            "vibration_value": 640,
+            "duration_ms": 4200,
+            "accel_delta": 0.16,
+            "timestamp": now.isoformat(),
+            "recent_count_10min": 2,
+        },
+        "recent_meaningful_events_10min": [
+            {
+                "detected_at": (now - timedelta(minutes=3)).isoformat(),
+                "event_type": "impact_noise",
+                "severity": "high",
+                "is_meaningful": True,
+            }
+        ],
+    }
+
+    res = client.post("/api/v1/ai/classify-event", json=payload)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["classification"]["sensor_id"] == payload["sensor_id"]
+    assert body["classification"]["event_type"] in {
+        "impact_noise",
+        "repeated_vibration",
+        "daily_noise",
+        "background_noise",
+        "unknown",
+    }
+    assert body["classification"]["severity"] in {"low", "medium", "high", "critical"}
+    assert isinstance(body["classification"]["is_meaningful"], bool)
+
+
+def test_analyze_patterns_route(monkeypatch) -> None:
+    db_url = _new_db_url()
+    monkeypatch.setenv("BACKEND_DB_URL", db_url)
+    _seed_db(db_url)
+    client = _build_client(db_url)
+
+    now = datetime.now()
+    payload = {
+        "household_id": 1,
+        "analysis_period_days": 7,
+        "reference_time": now.isoformat(),
+        "noise_events": [
+            {
+                "detected_at": (now - timedelta(minutes=5)).isoformat(),
+                "event_type": "impact_noise",
+                "severity": "high",
+                "is_meaningful": True,
+            },
+            {
+                "detected_at": (now - timedelta(days=9)).isoformat(),
+                "event_type": "daily_noise",
+                "severity": "medium",
+                "is_meaningful": True,
+            },
+        ],
+        "mediation_messages": [{"created_at": (now - timedelta(hours=3)).isoformat()}],
+    }
+
+    res = client.post("/api/v1/ai/analyze-patterns", json=payload)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["pattern_result"]["household_id"] == 1
+    assert body["pattern_result"]["period_days"] == 7
+    assert body["pattern_result"]["total_count"] == 1
+    assert body["pattern_result"]["recent_count_10min"] == 1

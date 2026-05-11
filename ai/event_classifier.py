@@ -39,17 +39,19 @@ def _score_severity(
     settings: AISettings,
 ) -> tuple[str, int]:
     thresholds = settings.thresholds
+    impact_lmax_threshold = thresholds.impact_lmax(night)
+    airborne_leq_threshold = thresholds.airborne_leq(night)
     recent_count_10min = _normalize_recent_count(event.recent_count_10min)
     score = 0
 
-    # dB score
-    if event.sound_level >= 65:
+    # dB score (relative to legal day/night thresholds)
+    if event.sound_level >= impact_lmax_threshold + 8:
         score += 4
-    elif event.sound_level >= 58:
+    elif event.sound_level >= impact_lmax_threshold + 2:
         score += 3
-    elif event.sound_level >= thresholds.db_impact:
+    elif event.sound_level >= impact_lmax_threshold:
         score += 2
-    elif event.sound_level >= thresholds.db_daily:
+    elif event.sound_level >= airborne_leq_threshold:
         score += 1
 
     # vibration score
@@ -107,6 +109,9 @@ def classify_event(
     cfg = settings or get_settings()
     thresholds = cfg.thresholds
     night = is_night(event.timestamp, cfg)
+    impact_leq_threshold = thresholds.impact_leq(night)
+    impact_lmax_threshold = thresholds.impact_lmax(night)
+    airborne_leq_threshold = thresholds.airborne_leq(night)
     accel_delta = float(event.accel_delta)
     recent_count_10min = _normalize_recent_count(event.recent_count_10min)
 
@@ -117,8 +122,8 @@ def classify_event(
     rule_hits: list[str] = []
 
     # 1) background noise
-    if event.sound_level < thresholds.db_background or (
-        event.sound_level < thresholds.db_daily
+    if event.sound_level < impact_leq_threshold or (
+        event.sound_level < airborne_leq_threshold
         and event.vibration_value < thresholds.vibration_low
         and event.duration_ms < thresholds.duration_short_ms
     ):
@@ -134,7 +139,7 @@ def classify_event(
 
     # 3) impact noise
     elif (
-        event.sound_level >= thresholds.db_impact
+        event.sound_level >= impact_lmax_threshold
         and event.vibration_value >= thresholds.vibration_high
         and accel_delta >= 0.12
     ):
@@ -143,7 +148,7 @@ def classify_event(
         rule_hits.extend(["impact_db_rule", "impact_vibration_rule", "impact_accel_rule"])
 
     # 4) daily noise
-    elif event.sound_level >= thresholds.db_daily:
+    elif event.sound_level >= airborne_leq_threshold:
         event_type = EventType.DAILY_NOISE.value
         confidence = 0.74
         rule_hits.append("daily_noise_rule")
@@ -179,5 +184,8 @@ def classify_event(
             "duration_ms": event.duration_ms,
             "accel_delta": round(accel_delta, 4),
             "recent_10min_meaningful_count": recent_count_10min,
+            "impact_leq_threshold": impact_leq_threshold,
+            "impact_lmax_threshold": impact_lmax_threshold,
+            "airborne_leq_threshold": airborne_leq_threshold,
         },
     )

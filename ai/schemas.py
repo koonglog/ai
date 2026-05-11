@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -29,30 +30,40 @@ class Acceleration:
 
 
 @dataclass(slots=True)
-class SensorReading:
+class EventFeatures:
     device_id: str
     source: str
     sound_level: float
     vibration_value: int
-    acceleration: Acceleration
     duration_ms: int
+    accel_delta: float
     timestamp: datetime
+    # Contract: count of meaningful events in the last 10 minutes.
+    # Raw sample/log counts are not allowed here.
+    recent_count_10min: int = 0
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "SensorReading":
+    def from_dict(cls, payload: dict[str, Any]) -> "EventFeatures":
         acc = payload.get("acceleration") or {}
+        accel_delta = payload.get("accel_delta")
+        if accel_delta is None:
+            try:
+                x = float(acc.get("x", 0.0))
+                y = float(acc.get("y", 0.0))
+                z = float(acc.get("z", 1.0))
+                magnitude = math.sqrt(x * x + y * y + z * z)
+                accel_delta = abs(magnitude - 1.0)
+            except (TypeError, ValueError):
+                accel_delta = 0.0
         return cls(
-            device_id=str(payload["device_id"]),
+            device_id=str(payload.get("device_id") or payload.get("sensor_id") or "unknown"),
             source=str(payload.get("source", "unknown")),
             sound_level=float(payload["sound_level"]),
             vibration_value=int(payload["vibration_value"]),
-            acceleration=Acceleration(
-                x=float(acc.get("x", 0.0)),
-                y=float(acc.get("y", 0.0)),
-                z=float(acc.get("z", 1.0)),
-            ),
             duration_ms=int(payload["duration_ms"]),
+            accel_delta=float(accel_delta),
             timestamp=datetime.fromisoformat(str(payload["timestamp"])),
+            recent_count_10min=int(payload.get("recent_count_10min") or 0),
         )
 
 
@@ -63,6 +74,7 @@ class EventClassificationResult:
     severity_score: int
     confidence: float
     is_night: bool
+    is_meaningful: bool
     rule_hits: list[str] = field(default_factory=list)
     features: dict[str, Any] = field(default_factory=dict)
 

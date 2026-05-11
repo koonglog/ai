@@ -242,14 +242,31 @@ def test_analyze_route(monkeypatch) -> None:
     payload = {
         "sensor_id": "SENSOR-A101-01",
         "source": "arduino",
-        "sound_level": 58.2,
-        "vibration_value": 640,
-        "acceleration": {"x": 0.1, "y": 0.0, "z": 1.16},
-        "duration_ms": 4200,
-        "timestamp": datetime.now().isoformat(),
+        "event_feature": {
+            "sound_level": 58.2,
+            "vibration_value": 640,
+            "duration_ms": 4200,
+            "accel_delta": 0.16,
+            "timestamp": datetime.now().isoformat(),
+            "recent_count_10min": 2,
+        },
         "household_id": 1,
         "analysis_period_days": 7,
-        "recent_noise_logs": [
+        "recent_meaningful_events_10min": [
+            {
+                "detected_at": (datetime.now() - timedelta(minutes=3)).isoformat(),
+                "event_type": "impact_noise",
+                "severity": "high",
+                "is_meaningful": True,
+            },
+            {
+                "detected_at": (datetime.now() - timedelta(minutes=8)).isoformat(),
+                "event_type": "daily_noise",
+                "severity": "medium",
+                "is_meaningful": True,
+            },
+        ],
+        "noise_events": [
             {
                 "detected_at": (datetime.now() - timedelta(days=1)).isoformat(),
                 "event_type": "impact_noise",
@@ -264,6 +281,10 @@ def test_analyze_route(monkeypatch) -> None:
         "mediation_messages": [
             {"created_at": (datetime.now() - timedelta(hours=10)).isoformat()}
         ],
+        "noise_type": "충격성 소리",
+        "noise_time_slot": "주로 야간",
+        "noise_frequency": "거의 매일",
+        "situation_description": "늦은 밤에 반복되는 큰 소리",
         "generate_message": True,
     }
 
@@ -280,12 +301,149 @@ def test_analyze_route(monkeypatch) -> None:
         "unknown",
     }
     assert body["noise_log"]["severity"] in {"low", "medium", "high", "critical"}
+    assert isinstance(body["noise_log"]["is_meaningful"], bool)
     assert body["pattern_result"]["period_days"] == 7
     assert "needs_mediation" in body["pattern_result"]
     assert isinstance(body["message_created"], bool)
+    if body["ai_result"] is not None:
+        assert "신고 소음 유형: 충격성 소리" in body["ai_result"]["admin_summary"]
 
     alias_res = client.post("/api/v1/sensor-readings", json=payload)
     assert alias_res.status_code == 200
     alias_body = alias_res.json()
     assert alias_body["status"] == "success"
     assert alias_body["noise_log"]["sensor_id"] == payload["sensor_id"]
+
+
+def test_analyze_route_blocks_repeated_vibration_when_only_raw_like_recent_logs(monkeypatch) -> None:
+    db_url = _new_db_url()
+    monkeypatch.setenv("BACKEND_DB_URL", db_url)
+    monkeypatch.setenv("ENABLE_OPENAI", "false")
+    _seed_db(db_url)
+    client = _build_client(db_url)
+
+    now = datetime.now()
+    payload = {
+        "sensor_id": "SENSOR-A101-01",
+        "source": "arduino",
+        "event_feature": {
+            "sound_level": 48.0,
+            "vibration_value": 420,
+            "duration_ms": 3000,
+            "accel_delta": 0.02,
+            "timestamp": now.isoformat(),
+        },
+        # Raw-like rows: no event_type/severity => excluded from meaningful count.
+        "recent_noise_logs": [
+            {"detected_at": (now - timedelta(minutes=2)).isoformat()},
+            {"detected_at": (now - timedelta(minutes=4)).isoformat()},
+            {"detected_at": (now - timedelta(minutes=6)).isoformat()},
+            {"detected_at": (now - timedelta(minutes=8)).isoformat()},
+            {"detected_at": (now - timedelta(minutes=9)).isoformat()},
+        ],
+    }
+
+    res = client.post("/api/v1/ai/analyze", json=payload)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["noise_log"]["event_type"] != "repeated_vibration"
+    assert body["pattern_result"]["recent_count_10min"] == 0
+
+
+def test_analyze_route_repeated_vibration_uses_meaningful_event_count(monkeypatch) -> None:
+    db_url = _new_db_url()
+    monkeypatch.setenv("BACKEND_DB_URL", db_url)
+    monkeypatch.setenv("ENABLE_OPENAI", "false")
+    _seed_db(db_url)
+    client = _build_client(db_url)
+
+    now = datetime.now()
+    payload = {
+        "sensor_id": "SENSOR-A101-01",
+        "source": "arduino",
+        "event_feature": {
+            "sound_level": 48.0,
+            "vibration_value": 420,
+            "duration_ms": 3000,
+            "accel_delta": 0.02,
+            "timestamp": now.isoformat(),
+        },
+        "recent_meaningful_events_10min": [
+            {
+                "detected_at": (now - timedelta(minutes=2)).isoformat(),
+                "event_type": "daily_noise",
+                "severity": "medium",
+            },
+            {
+                "detected_at": (now - timedelta(minutes=4)).isoformat(),
+                "event_type": "impact_noise",
+                "severity": "high",
+            },
+            {
+                "detected_at": (now - timedelta(minutes=8)).isoformat(),
+                "event_type": "daily_noise",
+                "severity": "medium",
+            },
+        ],
+    }
+
+    res = client.post("/api/v1/ai/analyze", json=payload)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["noise_log"]["event_type"] == "repeated_vibration"
+    assert body["pattern_result"]["recent_count_10min"] == 3
+
+
+def test_analyze_route_uses_noise_events_only_for_7day_analysis(monkeypatch) -> None:
+    db_url = _new_db_url()
+    monkeypatch.setenv("BACKEND_DB_URL", db_url)
+    monkeypatch.setenv("ENABLE_OPENAI", "false")
+    _seed_db(db_url)
+    client = _build_client(db_url)
+
+    now = datetime.now()
+    payload = {
+        "sensor_id": "SENSOR-A101-01",
+        "source": "arduino",
+        "event_feature": {
+            "sound_level": 52.0,
+            "vibration_value": 260,
+            "duration_ms": 4200,
+            "accel_delta": 0.01,
+            "timestamp": now.isoformat(),
+            "recent_count_10min": 0,
+        },
+        "household_id": 1,
+        "analysis_period_days": 7,
+        "noise_events": [
+            {
+                "detected_at": (now - timedelta(days=1)).isoformat(),
+                "event_type": "daily_noise",
+                "severity": "medium",
+            },
+            {
+                "detected_at": (now - timedelta(days=10)).isoformat(),
+                "event_type": "impact_noise",
+                "severity": "high",
+            },
+        ],
+        # Should be ignored because noise_events exists (fallback stage-out path).
+        "recent_noise_logs": [
+            {
+                "detected_at": (now - timedelta(days=1)).isoformat(),
+                "event_type": "impact_noise",
+                "severity": "high",
+            },
+            {
+                "detected_at": (now - timedelta(days=2)).isoformat(),
+                "event_type": "impact_noise",
+                "severity": "high",
+            },
+        ],
+    }
+
+    res = client.post("/api/v1/ai/analyze", json=payload)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["pattern_result"]["period_days"] == 7
+    assert body["pattern_result"]["total_count"] == 1

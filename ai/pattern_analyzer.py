@@ -65,7 +65,7 @@ def _post_mediation_recurrence(
 
 def analyze_patterns(
     household_id: int,
-    noise_logs: Sequence[Mapping[str, Any]],
+    noise_events: Sequence[Mapping[str, Any]],
     mediation_messages: Sequence[Mapping[str, Any]] | None = None,
     analysis_period_days: int = 7,
     reference_time: datetime | None = None,
@@ -73,6 +73,10 @@ def analyze_patterns(
 ) -> PatternAnalysisResult:
     """
     Analyze repeated noise pattern for one household.
+
+    Input contract:
+    - `noise_events` must be event-level records (not raw samples).
+    - Records without `event_type` or `severity` are excluded.
 
     Includes:
     - repeated days in period
@@ -88,14 +92,18 @@ def analyze_patterns(
     start = now - timedelta(days=analysis_period_days)
 
     in_window: list[dict[str, Any]] = []
-    for row in noise_logs:
-        dt = _parse_dt(row.get("detected_at"))
+    for row in noise_events:
+        dt = _parse_dt(row.get("detected_at") or row.get("timestamp"))
         if dt and start <= dt <= now:
+            event_type = str(row.get("event_type") or "").strip()
+            severity = str(row.get("severity") or "").strip()
+            if not event_type or not severity:
+                continue
             in_window.append(
                 {
                     "detected_at": dt,
-                    "event_type": str(row.get("event_type", "unknown")),
-                    "severity": str(row.get("severity", "low")),
+                    "event_type": event_type,
+                    "severity": severity,
                 }
             )
 

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import math
 from datetime import datetime
-from typing import Any, Mapping, Sequence
 
 from .config import AISettings, get_settings
-from .schemas import EventClassificationResult, EventType, SensorReading, Severity
+from .schemas import EventClassificationResult, EventFeatures, EventType, Severity
 
 
 def is_night(dt: datetime, settings: AISettings) -> bool:
@@ -16,79 +14,59 @@ def is_night(dt: datetime, settings: AISettings) -> bool:
     return hour >= start or hour < end
 
 
-def _accel_delta_g(reading: SensorReading) -> float:
-    """Return acceleration magnitude delta from 1g baseline."""
-    magnitude = math.sqrt(
-        reading.acceleration.x**2
-        + reading.acceleration.y**2
-        + reading.acceleration.z**2
-    )
-    return abs(magnitude - 1.0)
-
-
-def _parse_dt(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    return None
-
-
-def _count_recent_events_10min(
-    recent_events_10min: Sequence[Mapping[str, Any]] | None,
-    now: datetime,
-) -> int:
-    if not recent_events_10min:
-        return 0
-    count = 0
-    for row in recent_events_10min:
-        dt = _parse_dt(row.get("detected_at") or row.get("timestamp"))
-        if not dt:
-            continue
-        seconds = (now - dt).total_seconds()
-        if 0 <= seconds <= 600:
-            count += 1
+def _normalize_recent_count(raw_count: int) -> int:
+    count = int(raw_count)
+    if count < 0:
+        raise ValueError("recent_count_10min must be >= 0")
     return count
 
 
+def is_meaningful_event(event_type: str, severity: str) -> bool:
+    """Return True when event should be counted as meaningful downstream."""
+    if event_type != EventType.BACKGROUND_NOISE.value:
+        return True
+    return severity in {
+        Severity.MEDIUM.value,
+        Severity.HIGH.value,
+        Severity.CRITICAL.value,
+    }
+
+
 def _score_severity(
-    reading: SensorReading,
+    event: EventFeatures,
     night: bool,
-    recent_count_10min: int,
     event_type: str,
     settings: AISettings,
 ) -> tuple[str, int]:
     thresholds = settings.thresholds
+    recent_count_10min = _normalize_recent_count(event.recent_count_10min)
     score = 0
 
     # dB score
-    if reading.sound_level >= 65:
+    if event.sound_level >= 65:
         score += 4
-    elif reading.sound_level >= 58:
+    elif event.sound_level >= 58:
         score += 3
-    elif reading.sound_level >= thresholds.db_impact:
+    elif event.sound_level >= thresholds.db_impact:
         score += 2
-    elif reading.sound_level >= thresholds.db_daily:
+    elif event.sound_level >= thresholds.db_daily:
         score += 1
 
     # vibration score
-    if reading.vibration_value >= 800:
+    if event.vibration_value >= 800:
         score += 3
-    elif reading.vibration_value >= thresholds.vibration_high:
+    elif event.vibration_value >= thresholds.vibration_high:
         score += 2
-    elif reading.vibration_value >= thresholds.vibration_mid:
+    elif event.vibration_value >= thresholds.vibration_mid:
         score += 1
 
     # duration score
-    if reading.duration_ms >= thresholds.duration_long_ms:
+    if event.duration_ms >= thresholds.duration_long_ms:
         score += 2
-    elif reading.duration_ms >= thresholds.duration_medium_ms:
+    elif event.duration_ms >= thresholds.duration_medium_ms:
         score += 1
 
-    # context bonus
+    # Event-context bonuses (never raw sample count).
     if night and event_type != EventType.BACKGROUND_NOISE.value:
         score += 1
     if recent_count_10min >= 5:
@@ -108,12 +86,16 @@ def _score_severity(
 
 
 def classify_event(
-    reading: SensorReading,
-    recent_events_10min: Sequence[Mapping[str, Any]] | None = None,
+    event: EventFeatures,
     settings: AISettings | None = None,
 ) -> EventClassificationResult:
     """
-    Classify one sensor reading into an event type and severity.
+    Classify one event feature into event type and severity.
+
+    Contract:
+    - `event.recent_count_10min` must be "count of meaningful events in the
+      last 10 minutes".
+    - Raw log/sample count must not be passed.
 
     Rule priority:
     1) background_noise
@@ -124,9 +106,9 @@ def classify_event(
     """
     cfg = settings or get_settings()
     thresholds = cfg.thresholds
-    night = is_night(reading.timestamp, cfg)
-    accel_delta = _accel_delta_g(reading)
-    recent_count_10min = _count_recent_events_10min(recent_events_10min, reading.timestamp)
+    night = is_night(event.timestamp, cfg)
+    accel_delta = float(event.accel_delta)
+    recent_count_10min = _normalize_recent_count(event.recent_count_10min)
 
     event_type = EventType.UNKNOWN.value
     severity = Severity.LOW.value
@@ -135,25 +117,25 @@ def classify_event(
     rule_hits: list[str] = []
 
     # 1) background noise
-    if reading.sound_level < thresholds.db_background or (
-        reading.sound_level < thresholds.db_daily
-        and reading.vibration_value < thresholds.vibration_low
-        and reading.duration_ms < thresholds.duration_short_ms
+    if event.sound_level < thresholds.db_background or (
+        event.sound_level < thresholds.db_daily
+        and event.vibration_value < thresholds.vibration_low
+        and event.duration_ms < thresholds.duration_short_ms
     ):
         event_type = EventType.BACKGROUND_NOISE.value
         confidence = 0.95
         rule_hits.append("background_rule")
 
-    # 2) repeated vibration
-    elif reading.vibration_value >= thresholds.vibration_mid and recent_count_10min >= 3:
+    # 2) repeated vibration (recent_count_10min: meaningful events only)
+    elif event.vibration_value >= thresholds.vibration_mid and recent_count_10min >= 3:
         event_type = EventType.REPEATED_VIBRATION.value
         confidence = 0.82
         rule_hits.append("repeated_vibration_rule")
 
     # 3) impact noise
     elif (
-        reading.sound_level >= thresholds.db_impact
-        and reading.vibration_value >= thresholds.vibration_high
+        event.sound_level >= thresholds.db_impact
+        and event.vibration_value >= thresholds.vibration_high
         and accel_delta >= 0.12
     ):
         event_type = EventType.IMPACT_NOISE.value
@@ -161,7 +143,7 @@ def classify_event(
         rule_hits.extend(["impact_db_rule", "impact_vibration_rule", "impact_accel_rule"])
 
     # 4) daily noise
-    elif reading.sound_level >= thresholds.db_daily:
+    elif event.sound_level >= thresholds.db_daily:
         event_type = EventType.DAILY_NOISE.value
         confidence = 0.74
         rule_hits.append("daily_noise_rule")
@@ -176,12 +158,12 @@ def classify_event(
         score = 0
     else:
         severity, score = _score_severity(
-            reading=reading,
+            event=event,
             night=night,
-            recent_count_10min=recent_count_10min,
             event_type=event_type,
             settings=cfg,
         )
+    is_meaningful = is_meaningful_event(event_type=event_type, severity=severity)
 
     return EventClassificationResult(
         event_type=event_type,
@@ -189,12 +171,13 @@ def classify_event(
         severity_score=score,
         confidence=confidence,
         is_night=night,
+        is_meaningful=is_meaningful,
         rule_hits=rule_hits,
         features={
-            "sound_level": reading.sound_level,
-            "vibration_value": reading.vibration_value,
-            "duration_ms": reading.duration_ms,
+            "sound_level": event.sound_level,
+            "vibration_value": event.vibration_value,
+            "duration_ms": event.duration_ms,
             "accel_delta": round(accel_delta, 4),
-            "recent_10min_count": recent_count_10min,
+            "recent_10min_meaningful_count": recent_count_10min,
         },
     )

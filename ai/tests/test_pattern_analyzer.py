@@ -22,7 +22,7 @@ def test_pattern_analysis_returns_counts() -> None:
             "severity": "medium",
         },
     ]
-    result = analyze_patterns(household_id=1, noise_logs=logs, reference_time=ref)
+    result = analyze_patterns(household_id=1, noise_events=logs, reference_time=ref)
     assert result.total_events == 3
     assert result.repeated_days == 3
     assert result.night_events == 2
@@ -38,7 +38,7 @@ def test_cluster_count_in_10min() -> None:
         {"detected_at": (base + timedelta(minutes=4)).isoformat(), "event_type": "repeated_vibration", "severity": "medium"},
         {"detected_at": (base + timedelta(minutes=8)).isoformat(), "event_type": "repeated_vibration", "severity": "medium"},
     ]
-    result = analyze_patterns(household_id=1, noise_logs=logs, reference_time=ref)
+    result = analyze_patterns(household_id=1, noise_events=logs, reference_time=ref)
     assert result.max_events_in_10min == 4
     assert result.pattern_label in {"vibration_cluster", "recurring_noise"}
 
@@ -60,7 +60,7 @@ def test_escalation_when_post_mediation_recurrence_and_high_pattern() -> None:
 
     result = analyze_patterns(
         household_id=1,
-        noise_logs=logs,
+        noise_events=logs,
         mediation_messages=mediation_messages,
         reference_time=ref,
     )
@@ -70,7 +70,32 @@ def test_escalation_when_post_mediation_recurrence_and_high_pattern() -> None:
 
 def test_no_events_case() -> None:
     ref = datetime.fromisoformat("2026-05-08T00:00:00+09:00")
-    result = analyze_patterns(household_id=1, noise_logs=[], reference_time=ref)
+    result = analyze_patterns(household_id=1, noise_events=[], reference_time=ref)
     assert result.total_events == 0
     assert result.pattern_label == "no_pattern"
     assert result.needs_mediation is False
+
+
+def test_analysis_excludes_non_event_records_without_type_or_severity() -> None:
+    ref = datetime.fromisoformat("2026-05-08T00:00:00+09:00")
+    logs = [
+        {
+            "detected_at": (ref - timedelta(days=1)).replace(hour=23, minute=10).isoformat(),
+            "event_type": "impact_noise",
+            "severity": "high",
+        },
+        {
+            "detected_at": (ref - timedelta(days=1)).replace(hour=23, minute=12).isoformat(),
+            "event_type": None,
+            "severity": "high",
+            "sound_level": 66.0,
+        },
+        {
+            "detected_at": (ref - timedelta(days=1)).replace(hour=23, minute=14).isoformat(),
+            "event_type": "daily_noise",
+            "severity": "",
+            "vibration_value": 420,
+        },
+    ]
+    result = analyze_patterns(household_id=1, noise_events=logs, reference_time=ref)
+    assert result.total_events == 1

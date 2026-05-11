@@ -63,11 +63,12 @@ def _build_user_payload(
     event_context: Mapping[str, Any],
     pattern_result: PatternAnalysisResult | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "event_type": event_context.get("event_type"),
         "time_range": event_context.get("time_range"),
         "event_count": event_context.get("event_count"),
         "severity": event_context.get("severity"),
+        "target_unit": event_context.get("target_unit"),
         "pattern_summary": (
             pattern_result.summary if pattern_result else event_context.get("pattern_summary")
         ),
@@ -78,6 +79,16 @@ def _build_user_payload(
             "korean_language": True,
         },
     }
+    raw_manual = event_context.get("manual_report")
+    if isinstance(raw_manual, Mapping):
+        manual_report = {
+            str(key): str(value).strip()
+            for key, value in raw_manual.items()
+            if str(value).strip()
+        }
+        if manual_report:
+            payload["manual_report"] = manual_report
+    return payload
 
 
 class OpenAIMessageClient:

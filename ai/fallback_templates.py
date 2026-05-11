@@ -5,6 +5,28 @@ from typing import Any, Mapping
 from .schemas import AIMessageResult, PatternAnalysisResult
 
 
+def _build_manual_report_text(event_context: Mapping[str, Any]) -> str:
+    manual_report = event_context.get("manual_report")
+    if not isinstance(manual_report, Mapping):
+        return ""
+
+    noise_type = str(manual_report.get("noise_type", "")).strip()
+    noise_time_slot = str(manual_report.get("noise_time_slot", "")).strip()
+    noise_frequency = str(manual_report.get("noise_frequency", "")).strip()
+    situation_description = str(manual_report.get("situation_description", "")).strip()
+
+    parts: list[str] = []
+    if noise_type:
+        parts.append(f"신고 소음 유형: {noise_type}")
+    if noise_time_slot:
+        parts.append(f"신고 시간대: {noise_time_slot}")
+    if noise_frequency:
+        parts.append(f"신고 빈도: {noise_frequency}")
+    if situation_description:
+        parts.append(f"신고 상황: {situation_description}")
+    return " / ".join(parts)
+
+
 def build_fallback_message(
     event_context: Mapping[str, Any],
     pattern_result: PatternAnalysisResult | None = None,
@@ -14,6 +36,7 @@ def build_fallback_message(
     severity = str(event_context.get("severity", "low"))
     event_count = int(event_context.get("event_count", 1))
     time_range = str(event_context.get("time_range", "해당 시간대"))
+    manual_report_text = _build_manual_report_text(event_context)
 
     event_summary = f"{time_range} 동안 {event_type} 이벤트가 {event_count}회 감지되었습니다."
     resident_message = (
@@ -24,6 +47,8 @@ def build_fallback_message(
         f"이벤트 유형: {event_type}, 심각도: {severity}. "
         f"{pattern_result.summary if pattern_result else '단건 이벤트'}"
     )
+    if manual_report_text:
+        admin_summary = f"{admin_summary} {manual_report_text}"
 
     recommended_action = "no_action"
     if severity in {"medium", "high"}:

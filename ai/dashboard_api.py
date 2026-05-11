@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -15,11 +16,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
-from .config import AISettings, get_settings
-from .event_classifier import classify_event
+from .config import get_settings
+from .event_classifier import classify_event, is_meaningful_event
 from .message_generator import generate_mediation_message
 from .pattern_analyzer import analyze_patterns
-from .schemas import Acceleration, SensorReading
+from .schemas import EventFeatures
 
 
 @dataclass(frozen=True)
@@ -64,15 +65,22 @@ COMPLETED_STATUSES = {
 }
 
 
-class AnalyzeRecentNoiseLogIn(BaseModel):
+class AnalyzeEventFeatureIn(BaseModel):
+    sound_level: float
+    vibration_value: float
+    duration_ms: int = 0
+    accel_delta: float = 0.0
+    timestamp: datetime | None = None
+    # Contract: meaningful-event count in last 10 minutes only.
+    recent_count_10min: int | None = Field(default=None, ge=0)
+
+
+class AnalyzeNoiseEventIn(BaseModel):
     detected_at: datetime | None = None
     timestamp: datetime | None = None
     event_type: str | None = None
     severity: str | None = None
-    sound_level: float | None = None
-    vibration_value: float | None = None
-    duration_ms: int | None = None
-    acceleration: dict[str, float] | None = None
+    is_meaningful: bool | None = None
 
 
 class AnalyzeMediationMessageIn(BaseModel):
@@ -80,22 +88,34 @@ class AnalyzeMediationMessageIn(BaseModel):
 
 
 class AnalyzeRequestIn(BaseModel):
-    # 1:1 with backend NoiseData
     sensor_id: str
-    sound_level: float
-    vibration_value: float
+    source: str = "backend"
+
+    # Preferred contract (event-level aggregated feature).
+    event_feature: AnalyzeEventFeatureIn | None = None
+
+    # Legacy raw fields (stage-out path; only used when event_feature is omitted).
+    sound_level: float | None = None
+    vibration_value: float | None = None
     duration_ms: int | None = None
     timestamp: datetime | None = None
     acceleration: dict[str, float] | None = None
 
     # Optional context for richer AI analysis.
-    source: str = "backend"
     household_id: int | None = None
     target_unit: str | None = None
-    recent_noise_logs: list[AnalyzeRecentNoiseLogIn] = Field(default_factory=list)
+    recent_meaningful_events_10min: list[AnalyzeNoiseEventIn] = Field(default_factory=list)
+    noise_events: list[AnalyzeNoiseEventIn] = Field(default_factory=list)
+    # Legacy context path (stage-out): accepted, but raw fallback classification is disabled.
+    recent_noise_logs: list[AnalyzeNoiseEventIn] = Field(default_factory=list)
     mediation_messages: list[AnalyzeMediationMessageIn] = Field(default_factory=list)
     analysis_period_days: int = Field(default=7, ge=1, le=90)
     generate_message: bool = True
+    # Optional manual context from mediation request UI.
+    noise_type: str | None = None
+    noise_time_slot: str | None = None
+    noise_frequency: str | None = None
+    situation_description: str | None = None
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -266,16 +286,17 @@ def _query_noise_logs(
 
         if event_type is None or severity is None:
             # If backend has not classified yet, classify on read path.
-            reading = SensorReading(
+            event_features = EventFeatures(
                 device_id=str(record.get("id") or "unknown"),
                 source="backend_db",
                 sound_level=sound,
                 vibration_value=vibration,
-                acceleration=Acceleration(x=0.0, y=0.0, z=1.0),
                 duration_ms=duration_ms,
+                accel_delta=0.0,
                 timestamp=detected_at,
+                recent_count_10min=0,
             )
-            result = classify_event(reading=reading, settings=ai_settings)
+            result = classify_event(event=event_features, settings=ai_settings)
             if event_type is None:
                 event_type = result.event_type
             if severity is None:
@@ -395,7 +416,7 @@ def _pattern_for_household(
         mediation_payload.append({"created_at": _naive(created_at) if created_at else None})
     pattern = analyze_patterns(
         household_id=household_id,
-        noise_logs=pattern_logs,
+        noise_events=pattern_logs,
         mediation_messages=mediation_payload,
         analysis_period_days=days,
         reference_time=datetime.now(timezone.utc).replace(tzinfo=None),
@@ -466,6 +487,55 @@ def _build_household_status(
     return sorted(results, key=lambda x: (x["status"] != "urgent", -x["total_events"]))
 
 
+def _calc_accel_delta_from_vector(acceleration: dict[str, float] | None) -> float:
+    if not acceleration:
+        return 0.0
+    x = float(acceleration.get("x", 0.0))
+    y = float(acceleration.get("y", 0.0))
+    z = float(acceleration.get("z", 1.0))
+    magnitude = math.sqrt(x * x + y * y + z * z)
+    return abs(magnitude - 1.0)
+
+
+def _normalize_noise_events(events: list[AnalyzeNoiseEventIn]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for event in events:
+        dt = event.detected_at or event.timestamp
+        if dt is None:
+            continue
+        event_type = str(event.event_type or "").strip()
+        severity = str(event.severity or "").strip()
+        if not event_type or not severity:
+            continue
+        normalized.append(
+            {
+                "detected_at": _to_naive_utc(dt),
+                "event_type": event_type,
+                "severity": severity,
+                "is_meaningful": event.is_meaningful,
+            }
+        )
+    return normalized
+
+
+def _count_recent_meaningful_events(
+    recent_events: list[dict[str, Any]],
+    reference_time: datetime,
+) -> int:
+    count = 0
+    for row in recent_events:
+        dt = row["detected_at"]
+        seconds = (reference_time - dt).total_seconds()
+        if seconds < 0 or seconds > 600:
+            continue
+        is_meaningful = row.get("is_meaningful")
+        if is_meaningful is None:
+            is_meaningful = is_meaningful_event(row["event_type"], row["severity"])
+        if is_meaningful:
+            count += 1
+    return count
+
+
 def create_dashboard_app() -> FastAPI:
     app = FastAPI(title="KoongLog AI Dashboard API", version="0.1.0")
 
@@ -485,80 +555,62 @@ def create_dashboard_app() -> FastAPI:
     @app.post("/api/v1/ai/analyze")
     @app.post("/api/v1/sensor-readings")
     def analyze_ai(payload: AnalyzeRequestIn) -> dict[str, Any]:
-        sensor_ts = _to_naive_utc(payload.timestamp or datetime.now(timezone.utc))
-        accel = payload.acceleration or {}
-        duration_ms = int(payload.duration_ms or 0)
-        vibration_value = int(payload.vibration_value)
-        reading = SensorReading(
-            device_id=payload.sensor_id,
-            source=payload.source,
-            sound_level=payload.sound_level,
-            vibration_value=vibration_value,
-            acceleration=Acceleration(
-                x=float(accel.get("x", 0.0)),
-                y=float(accel.get("y", 0.0)),
-                z=float(accel.get("z", 1.0)),
-            ),
-            duration_ms=duration_ms,
-            timestamp=sensor_ts,
-        )
+        settings = get_settings()
 
-        recent_events: list[dict[str, Any]] = []
-        pattern_logs: list[dict[str, Any]] = []
-        high_count = 0
-        night_count = 0
-        for event in payload.recent_noise_logs:
-            dt = event.detected_at or event.timestamp
-            if dt is None:
-                continue
-            dt_naive = _to_naive_utc(dt)
-            recent_events.append({"detected_at": dt_naive})
+        # Preferred context: event-only records. Legacy recent_noise_logs is accepted
+        # only for already-classified event rows (no raw fallback classification).
+        recent_context_events = _normalize_noise_events(payload.recent_meaningful_events_10min)
+        if payload.recent_noise_logs:
+            recent_context_events.extend(_normalize_noise_events(payload.recent_noise_logs))
 
-            event_type = event.event_type or "unknown"
-            severity = event.severity or "low"
-
-            if not event.event_type or not event.severity:
-                temp_accel = event.acceleration or {}
-                temp_reading = SensorReading(
-                    device_id=payload.sensor_id,
-                    source=payload.source,
-                    sound_level=float(event.sound_level or 0.0),
-                    vibration_value=int(event.vibration_value or 0),
-                    acceleration=Acceleration(
-                        x=float(temp_accel.get("x", 0.0)),
-                        y=float(temp_accel.get("y", 0.0)),
-                        z=float(temp_accel.get("z", 1.0)),
-                    ),
-                    duration_ms=int(event.duration_ms or 0),
-                    timestamp=dt_naive,
+        if payload.event_feature is not None:
+            feature_in = payload.event_feature
+            sensor_ts = _to_naive_utc(feature_in.timestamp or payload.timestamp or datetime.now(timezone.utc))
+            recent_count_10min = (
+                int(feature_in.recent_count_10min)
+                if feature_in.recent_count_10min is not None
+                else _count_recent_meaningful_events(recent_context_events, sensor_ts)
+            )
+            event_features = EventFeatures(
+                device_id=payload.sensor_id,
+                source=payload.source,
+                sound_level=float(feature_in.sound_level),
+                vibration_value=int(feature_in.vibration_value),
+                duration_ms=int(feature_in.duration_ms or 0),
+                accel_delta=float(feature_in.accel_delta),
+                timestamp=sensor_ts,
+                recent_count_10min=recent_count_10min,
+            )
+        else:
+            if payload.sound_level is None or payload.vibration_value is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="event_feature is required (legacy raw fields require sound_level/vibration_value)",
                 )
-                temp_result = classify_event(
-                    reading=temp_reading,
-                    recent_events_10min=None,
-                    settings=get_settings(),
-                )
-                if not event.event_type:
-                    event_type = temp_result.event_type
-                if not event.severity:
-                    severity = temp_result.severity
-
-            if severity in {"high", "critical"}:
-                high_count += 1
-            if dt_naive.hour >= 22 or dt_naive.hour < 7:
-                night_count += 1
-
-            pattern_logs.append(
-                {
-                    "detected_at": dt_naive,
-                    "event_type": event_type,
-                    "severity": severity,
-                }
+            sensor_ts = _to_naive_utc(payload.timestamp or datetime.now(timezone.utc))
+            event_features = EventFeatures(
+                device_id=payload.sensor_id,
+                source=payload.source,
+                sound_level=float(payload.sound_level),
+                vibration_value=int(payload.vibration_value),
+                duration_ms=int(payload.duration_ms or 0),
+                accel_delta=_calc_accel_delta_from_vector(payload.acceleration),
+                timestamp=sensor_ts,
+                recent_count_10min=_count_recent_meaningful_events(recent_context_events, sensor_ts),
             )
 
-        classification = classify_event(
-            reading=reading,
-            recent_events_10min=recent_events,
-            settings=get_settings(),
+        classification = classify_event(event=event_features, settings=settings)
+
+        noise_events = _normalize_noise_events(payload.noise_events)
+        if not noise_events and payload.recent_noise_logs:
+            # Stage-out path: fallback source reduced to event rows only.
+            noise_events = _normalize_noise_events(payload.recent_noise_logs)
+
+        high_count = sum(1 for row in noise_events if row["severity"] in {"high", "critical"})
+        night_count = sum(
+            1
+            for row in noise_events
+            if row["detected_at"].hour >= 22 or row["detected_at"].hour < 7
         )
 
         pattern_obj = None
@@ -570,7 +622,7 @@ def create_dashboard_app() -> FastAPI:
             ]
             pattern_obj = analyze_patterns(
                 household_id=payload.household_id,
-                noise_logs=pattern_logs,
+                noise_events=noise_events,
                 mediation_messages=mediation_messages,
                 analysis_period_days=period_days,
                 reference_time=sensor_ts,
@@ -578,7 +630,7 @@ def create_dashboard_app() -> FastAPI:
             total_count = pattern_obj.total_events
             night_count = pattern_obj.night_events
         else:
-            total_count = len(pattern_logs)
+            total_count = len(noise_events)
 
         needs_mediation = (
             (pattern_obj.needs_mediation if pattern_obj is not None else False)
@@ -594,6 +646,7 @@ def create_dashboard_app() -> FastAPI:
             "high_count": high_count,
             "needs_mediation": needs_mediation,
             "period_days": period_days,
+            "recent_count_10min": event_features.recent_count_10min,
             "needs_escalation": pattern_obj.needs_escalation if pattern_obj is not None else False,
             "pattern_label": (
                 pattern_obj.pattern_label
@@ -613,17 +666,26 @@ def create_dashboard_app() -> FastAPI:
             classification.severity in {"medium", "high", "critical"} or needs_mediation
         ):
             event_count = max(1, total_count)
+            manual_report = {
+                "noise_type": (payload.noise_type or "").strip(),
+                "noise_time_slot": (payload.noise_time_slot or "").strip(),
+                "noise_frequency": (payload.noise_frequency or "").strip(),
+                "situation_description": (payload.situation_description or "").strip(),
+            }
+            manual_report = {k: v for k, v in manual_report.items() if v}
             event_context = {
                 "event_type": classification.event_type,
                 "severity": classification.severity,
                 "time_range": sensor_ts.strftime("%H:%M"),
                 "event_count": event_count,
                 "pattern_summary": pattern_result["summary"],
+                "target_unit": payload.target_unit,
+                "manual_report": manual_report,
             }
             message = generate_mediation_message(
                 event_context=event_context,
                 pattern_result=pattern_obj,
-                settings=get_settings(),
+                settings=settings,
             )
             message_created = True
             ai_result = {
@@ -647,6 +709,7 @@ def create_dashboard_app() -> FastAPI:
                 "severity_score": classification.severity_score,
                 "confidence": classification.confidence,
                 "is_night": classification.is_night,
+                "is_meaningful": classification.is_meaningful,
                 "timestamp": sensor_ts.isoformat(),
             },
             "pattern_result": pattern_result,

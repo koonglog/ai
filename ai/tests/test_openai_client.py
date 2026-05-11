@@ -16,9 +16,11 @@ class _FakeResponses:
     def __init__(self, outputs):
         self._outputs = outputs
         self.calls = 0
+        self.last_kwargs = None
 
     def create(self, **kwargs):
         self.calls += 1
+        self.last_kwargs = kwargs
         output_text = self._outputs[self.calls - 1]
 
         class _Response:
@@ -144,6 +146,42 @@ def test_openai_client_raise_after_retry_exhausted(monkeypatch) -> None:
                 "severity": "medium",
             }
         )
+
+
+def test_openai_client_includes_manual_report_in_user_payload() -> None:
+    payload = {
+        "event_summary": "요약",
+        "resident_message": "확인 부탁드립니다.",
+        "admin_summary": "관리자 요약",
+        "recommended_action": "quiet_time_request",
+        "tone_check": {
+            "is_neutral": True,
+            "contains_blame": False,
+            "contains_threat": False,
+        },
+    }
+    fake = _FakeClient([json.dumps(payload, ensure_ascii=False)])
+    client = OpenAIMessageClient(settings=_settings(max_retries=0), client=fake)
+
+    client.generate_message(
+        event_context={
+            "event_type": "daily_noise",
+            "time_range": "23:10-23:20",
+            "event_count": 3,
+            "severity": "medium",
+            "manual_report": {
+                "noise_type": "충격성 소리",
+                "noise_time_slot": "주로 야간",
+                "noise_frequency": "거의 매일",
+                "situation_description": "늦은 밤에 반복되는 큰 소리",
+            },
+        }
+    )
+
+    assert fake.responses.last_kwargs is not None
+    user_payload = fake.responses.last_kwargs["input"][1]["content"]
+    parsed = json.loads(user_payload)
+    assert parsed["manual_report"]["noise_type"] == "충격성 소리"
 
 
 def test_openai_client_extract_output_items_dict_shape() -> None:

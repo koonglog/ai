@@ -24,6 +24,8 @@ ai/
     test_event_classifier.py
     test_pattern_analyzer.py
     test_message_generator.py
+    test_openai_client.py
+    test_dashboard_api.py
 
 .env.example
 README.md
@@ -78,11 +80,25 @@ Copy-Item .env.example .env
 - `event_classifier.py`
   - 이벤트 분류: `background_noise`, `daily_noise`, `impact_noise`, `repeated_vibration`, `unknown`
   - 심각도 분류: `low`, `medium`, `high`, `critical`
+  - 입력 계약: `EventFeatures`
+    - `sound_level`, `vibration_value`, `duration_ms`, `accel_delta`, `timestamp`, `recent_count_10min`
+  - `recent_count_10min`은 **최근 10분 의미 이벤트 수**만 허용(raw 카운트 금지)
+  - 분류 결과에 `is_meaningful` 포함 (downstream 재사용)
 
 - `pattern_analyzer.py`
   - 최근 N일(기본 7일) 이벤트 분석
+  - 입력 소스는 `noise_events`(이벤트 레코드)로 고정
+  - `event_type`/`severity` 없는 레코드는 분석에서 제외
   - 야간 이벤트 수, 반복 발생 일수, 10분 클러스터 최대치 계산
   - 중재 후 재발 여부(`post_mediation_recurrence`) 및 escalation 후보 판단
+
+- `dashboard_api.py`
+  - `/api/v1/ai/analyze`, `/api/v1/sensor-readings`
+  - 권장 입력:
+    - `event_feature` + `recent_meaningful_events_10min` + `noise_events`
+  - 레거시 `recent_noise_logs` 경로는 단계적 축소:
+    - 이미 분류된 이벤트 행(`event_type`, `severity` 포함)만 사용
+    - raw fallback 분류 경로는 사용하지 않음
 
 - `message_generator.py`
   - 조건부 OpenAI 호출
@@ -90,6 +106,7 @@ Copy-Item .env.example .env
 
 - `fallback_templates.py`
   - OpenAI 실패 시에도 항상 중립 메시지 생성
+  - 수동 신고 정보(`noise_type`, `noise_time_slot`, `noise_frequency`, `situation_description`)를 admin summary에 반영
 
 ---
 
@@ -123,7 +140,7 @@ python -m pytest -q
 - `event_classifier`: 배경/일상/충격/반복진동
 - `pattern_analyzer`: 7일 반복, 야간 집계, 10분 클러스터, escalation, 무이벤트 케이스
 
-현재 테스트 결과:
+당시 테스트 결과:
 - `10 passed`
 
 4) `openai_client.py` 고도화
@@ -149,6 +166,29 @@ python -m pytest -q
   - `tone_check.is_neutral=True`
   - `resident_message` 생성 길이 확인
 
-현재 테스트 결과:
+당시 테스트 결과:
 - `14 passed`
+
+7) 이벤트 기준 입력 계약으로 리팩터링 (백엔드 연계)
+- `classify_event` 입력을 raw 샘플 기반에서 이벤트 feature(`EventFeatures`) 기반으로 전환
+- `recent_count_10min` 계약 명시:
+  - "최근 10분 의미 이벤트 수"만 허용
+  - raw 카운트 입력 금지 (주석/타입/검증 반영)
+- `is_meaningful_event` 함수 추가 및 `EventClassificationResult.is_meaningful` 필드 추가
+- 심각도 계산의 야간/반복 가중치를 이벤트 컨텍스트 기준으로 정합
+- `analyze_patterns` 입력을 `noise_events`로 고정하고, 불완전 레코드(`event_type`/`severity` 누락) 제외
+- `/api/v1/ai/analyze` 입력 구조 정리:
+  - 권장: `event_feature + recent_meaningful_events_10min + noise_events`
+  - `recent_noise_logs` fallback 경로는 이벤트 행 전용으로 축소
+- 수동 신고 컨텍스트 유지:
+  - `noise_type`, `noise_time_slot`, `noise_frequency`, `situation_description`
+  - OpenAI payload / fallback 템플릿 모두 전달
+
+8) 테스트 보강
+- raw 과다 유입 시 반복진동 오분류 방지 케이스 추가
+- 의미 이벤트만 카운트했을 때 `repeated_vibration` 동작 검증 추가
+- 7일 분석이 `noise_events` 기준으로만 계산되는지 검증 추가
+
+현재 테스트 결과:
+- `25 passed`
 

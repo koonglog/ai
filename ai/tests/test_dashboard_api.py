@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -161,6 +162,7 @@ def _build_client(db_url: str) -> TestClient:
     dashboard_api.get_backend_settings.cache_clear()
     dashboard_api.get_engine.cache_clear()
     dashboard_api.get_schema.cache_clear()
+    dashboard_api.get_settings.cache_clear()
     app = dashboard_api.create_dashboard_app()
     return TestClient(app)
 
@@ -261,7 +263,7 @@ def test_analyze_route(monkeypatch) -> None:
             },
             {
                 "detected_at": (datetime.now() - timedelta(minutes=8)).isoformat(),
-                "event_type": "daily_noise",
+                "event_type": "repeated_vibration",
                 "severity": "medium",
                 "is_meaningful": True,
             },
@@ -371,8 +373,8 @@ def test_analyze_route_repeated_vibration_uses_meaningful_event_count(monkeypatc
         "recent_meaningful_events_10min": [
             {
                 "detected_at": (now - timedelta(minutes=2)).isoformat(),
-                "event_type": "daily_noise",
-                "severity": "medium",
+                "event_type": "impact_noise",
+                "severity": "high",
             },
             {
                 "detected_at": (now - timedelta(minutes=4)).isoformat(),
@@ -381,7 +383,7 @@ def test_analyze_route_repeated_vibration_uses_meaningful_event_count(monkeypatc
             },
             {
                 "detected_at": (now - timedelta(minutes=8)).isoformat(),
-                "event_type": "daily_noise",
+                "event_type": "repeated_vibration",
                 "severity": "medium",
             },
         ],
@@ -530,3 +532,102 @@ def test_analyze_patterns_route(monkeypatch) -> None:
     assert body["pattern_result"]["period_days"] == 7
     assert body["pattern_result"]["total_count"] == 1
     assert body["pattern_result"]["recent_count_10min"] == 1
+
+
+def test_shadow_mode_writes_classification_log(monkeypatch) -> None:
+    db_url = _new_db_url()
+    shadow_log = Path(__file__).resolve().parent / ".tmp" / f"shadow_{uuid4().hex}.jsonl"
+    monkeypatch.setenv("BACKEND_DB_URL", db_url)
+    monkeypatch.setenv("ENABLE_OPENAI", "false")
+    monkeypatch.setenv("AI_CLASSIFIER_BACKEND", "rule")
+    monkeypatch.setenv("AI_LGBM_SHADOW_MODE", "true")
+    monkeypatch.setenv("AI_LGBM_SHADOW_LOG_PATH", str(shadow_log))
+    _seed_db(db_url)
+    client = _build_client(db_url)
+
+    payload = {
+        "sensor_id": "SENSOR-A101-01",
+        "source": "arduino",
+        "event_feature": {
+            "sound_level": 58.2,
+            "vibration_value": 640,
+            "duration_ms": 4200,
+            "accel_delta": 0.16,
+            "timestamp": datetime.now().isoformat(),
+            "recent_count_10min": 2,
+        },
+        "household_id": 1,
+        "analysis_period_days": 7,
+        "generate_message": False,
+    }
+
+    res = client.post("/api/v1/ai/analyze", json=payload)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["noise_log"]["event_type"] in {
+        "impact_noise",
+        "repeated_vibration",
+        "daily_noise",
+        "background_noise",
+        "unknown",
+    }
+
+    assert shadow_log.exists()
+    lines = [line for line in shadow_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) >= 1
+    latest = json.loads(lines[-1])
+    assert latest["route"] == "/api/v1/ai/analyze"
+    assert "primary" in latest
+    assert "rule" in latest
+    assert "lightgbm" in latest
+    assert "diff" in latest
+
+
+def test_analyze_response_schema_unchanged_when_lightgbm_falls_back(monkeypatch) -> None:
+    db_url = _new_db_url()
+    model_dir = Path(__file__).resolve().parent / ".tmp" / f"missing_models_{uuid4().hex}"
+    monkeypatch.setenv("BACKEND_DB_URL", db_url)
+    monkeypatch.setenv("ENABLE_OPENAI", "false")
+    monkeypatch.setenv("AI_CLASSIFIER_BACKEND", "lightgbm")
+    monkeypatch.setenv("AI_LGBM_MODEL_DIR", str(model_dir))
+    monkeypatch.setenv("AI_LGBM_SHADOW_MODE", "false")
+    _seed_db(db_url)
+    client = _build_client(db_url)
+
+    payload = {
+        "sensor_id": "SENSOR-A101-01",
+        "source": "arduino",
+        "event_feature": {
+            "sound_level": 58.2,
+            "vibration_value": 640,
+            "duration_ms": 4200,
+            "accel_delta": 0.16,
+            "timestamp": datetime.now().isoformat(),
+            "recent_count_10min": 2,
+        },
+        "household_id": 1,
+        "analysis_period_days": 7,
+        "generate_message": False,
+    }
+
+    res = client.post("/api/v1/ai/analyze", json=payload)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+
+    noise_log_keys = set(body["noise_log"].keys())
+    assert noise_log_keys == {
+        "id",
+        "sensor_id",
+        "household_id",
+        "event_type",
+        "severity",
+        "severity_score",
+        "confidence",
+        "is_night",
+        "is_meaningful",
+        "timestamp",
+    }
+    assert "classifier_backend" not in body["noise_log"]
+    assert "rule_hits" not in body["noise_log"]

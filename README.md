@@ -194,3 +194,64 @@ python -m pytest -q
 현재 테스트 결과:
 - `25 passed`
 
+
+---
+
+## 7) LightGBM Deployment Runbook (2026-05-13)
+
+This runbook documents the production migration path for event classification from rule-only to LightGBM-backed inference while preserving API response schema.
+
+### 7.1 Migration phases
+
+1. Phase 0 (baseline): `AI_CLASSIFIER_BACKEND=rule`, `AI_LGBM_SHADOW_MODE=false`
+2. Phase 1 (observe): `AI_CLASSIFIER_BACKEND=rule`, `AI_LGBM_SHADOW_MODE=true`
+3. Phase 2 (hybrid): `AI_CLASSIFIER_BACKEND=hybrid`, `AI_LGBM_SHADOW_MODE=true`
+4. Phase 3 (promote): `AI_CLASSIFIER_BACKEND=lightgbm`, `AI_LGBM_SHADOW_MODE=true`
+5. Phase 4 (stable): `AI_CLASSIFIER_BACKEND=lightgbm`, `AI_LGBM_SHADOW_MODE=false`
+
+Recommended practice: keep each phase for at least one operation window and compare shadow logs before promotion.
+
+### 7.2 Required environment variables
+
+- `AI_CLASSIFIER_BACKEND` (`rule|hybrid|lightgbm`)
+- `AI_LGBM_MODEL_DIR` (directory containing model artifacts)
+- `AI_LGBM_MIN_CONFIDENCE` (0.0-1.0)
+- `AI_LGBM_SHADOW_MODE` (`true|false`)
+- `AI_LGBM_SHADOW_LOG_PATH` (JSONL output path)
+
+### 7.3 Test matrix before each promotion
+
+```powershell
+# Rule baseline
+$env:AI_CLASSIFIER_BACKEND = "rule"
+$env:AI_LGBM_SHADOW_MODE = "false"
+python -m pytest -q
+
+# Hybrid + shadow
+$env:AI_CLASSIFIER_BACKEND = "hybrid"
+$env:AI_LGBM_SHADOW_MODE = "true"
+python -m pytest -q
+
+# LightGBM + shadow
+$env:AI_CLASSIFIER_BACKEND = "lightgbm"
+$env:AI_LGBM_SHADOW_MODE = "true"
+python -m pytest -q
+```
+
+### 7.4 Rollback (immediate)
+
+If quality or latency regresses, rollback without code change:
+
+```powershell
+$env:AI_CLASSIFIER_BACKEND = "rule"
+$env:AI_LGBM_SHADOW_MODE = "false"
+```
+
+Then restart the AI service process and verify `/health` and `/api/v1/ai/analyze` smoke calls.
+
+### 7.5 Smoke checklist
+
+1. `/api/v1/ai/classify-event` returns `event_type`, `severity`, `confidence`, `is_meaningful`.
+2. `/api/v1/ai/analyze` response keeps existing `noise_log` fields (no schema drift).
+3. Shadow log file is appended when `AI_LGBM_SHADOW_MODE=true`.
+4. Fallback path works when model artifacts are missing.

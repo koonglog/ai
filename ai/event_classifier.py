@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Protocol
 
 from .config import AISettings, get_settings
+from .lgbm_runtime import LGBMInferenceResult, LightGBMRuntime, get_lgbm_runtime
 from .schemas import EventClassificationResult, EventFeatures, EventType, Severity
 
 
@@ -22,13 +24,11 @@ def _normalize_recent_count(raw_count: int) -> int:
 
 
 def is_meaningful_event(event_type: str, severity: str) -> bool:
-    """Return True when event should be counted as meaningful downstream."""
-    if event_type != EventType.BACKGROUND_NOISE.value:
-        return True
-    return severity in {
-        Severity.MEDIUM.value,
-        Severity.HIGH.value,
-        Severity.CRITICAL.value,
+    """Return True only for persistence-target event categories."""
+    _ = severity  # kept for backward-compatible function signature
+    return event_type in {
+        EventType.IMPACT_NOISE.value,
+        EventType.REPEATED_VIBRATION.value,
     }
 
 
@@ -87,26 +87,63 @@ def _score_severity(
     return Severity.LOW.value, score
 
 
-def classify_event(
-    event: EventFeatures,
-    settings: AISettings | None = None,
+class RuntimePredictor(Protocol):
+    def predict_event(
+        self,
+        event: EventFeatures,
+        *,
+        min_confidence: float | None = None,
+    ) -> LGBMInferenceResult: ...
+
+
+def _append_runtime_metadata(
+    result: EventClassificationResult,
+    *,
+    backend: str,
+    runtime_result: LGBMInferenceResult | None = None,
+    extra_rule_hits: list[str] | None = None,
 ) -> EventClassificationResult:
-    """
-    Classify one event feature into event type and severity.
+    rule_hits = list(result.rule_hits)
+    if extra_rule_hits:
+        rule_hits.extend(extra_rule_hits)
 
-    Contract:
-    - `event.recent_count_10min` must be "count of meaningful events in the
-      last 10 minutes".
-    - Raw log/sample count must not be passed.
+    features = dict(result.features)
+    features["classifier_backend"] = backend
+    if runtime_result is not None:
+        if runtime_result.reason is not None:
+            features["lgbm_reason"] = runtime_result.reason
+        if runtime_result.meaningful_probability is not None:
+            features["lgbm_meaningful_probability"] = round(
+                float(runtime_result.meaningful_probability),
+                6,
+            )
+        if runtime_result.event_type_probability is not None:
+            features["lgbm_event_type_probability"] = round(
+                float(runtime_result.event_type_probability),
+                6,
+            )
+        if runtime_result.event_type_probabilities is not None:
+            features["lgbm_event_type_probabilities"] = {
+                key: round(float(value), 6)
+                for key, value in runtime_result.event_type_probabilities.items()
+            }
 
-    Rule priority:
-    1) background_noise
-    2) repeated_vibration
-    3) impact_noise
-    4) daily_noise
-    5) unknown
-    """
-    cfg = settings or get_settings()
+    return EventClassificationResult(
+        event_type=result.event_type,
+        severity=result.severity,
+        severity_score=result.severity_score,
+        confidence=result.confidence,
+        is_night=result.is_night,
+        is_meaningful=result.is_meaningful,
+        rule_hits=rule_hits,
+        features=features,
+    )
+
+
+def _classify_event_rule(
+    event: EventFeatures,
+    cfg: AISettings,
+) -> EventClassificationResult:
     thresholds = cfg.thresholds
     night = is_night(event.timestamp, cfg)
     impact_leq_threshold = thresholds.impact_leq(night)
@@ -189,3 +226,122 @@ def classify_event(
             "airborne_leq_threshold": airborne_leq_threshold,
         },
     )
+
+
+def _classify_event_lightgbm_or_fallback(
+    *,
+    event: EventFeatures,
+    cfg: AISettings,
+    rule_result: EventClassificationResult,
+    runtime: RuntimePredictor,
+) -> EventClassificationResult:
+    # Keep rule-based impact detection as a hard backup while impact class
+    # data remains extremely sparse in exports.
+    if rule_result.event_type == EventType.IMPACT_NOISE.value:
+        return _append_runtime_metadata(
+            rule_result,
+            backend="rule_impact_backup",
+            extra_rule_hits=["impact_rule_backup"],
+        )
+
+    runtime_result = runtime.predict_event(
+        event,
+        min_confidence=cfg.classifier.lgbm_min_confidence,
+    )
+    if runtime_result.should_fallback:
+        return _append_runtime_metadata(
+            rule_result,
+            backend="rule_fallback",
+            runtime_result=runtime_result,
+            extra_rule_hits=["lgbm_fallback"],
+        )
+
+    if not runtime_result.event_type:
+        return _append_runtime_metadata(
+            rule_result,
+            backend="rule_fallback",
+            runtime_result=runtime_result,
+            extra_rule_hits=["lgbm_fallback_no_event_type"],
+        )
+
+    event_type = runtime_result.event_type
+    night = is_night(event.timestamp, cfg)
+    if event_type == EventType.BACKGROUND_NOISE.value:
+        severity = Severity.LOW.value
+        score = 0
+    else:
+        severity, score = _score_severity(
+            event=event,
+            night=night,
+            event_type=event_type,
+            settings=cfg,
+        )
+    is_meaningful = is_meaningful_event(event_type=event_type, severity=severity)
+    confidence = float(
+        runtime_result.event_type_probability
+        if runtime_result.event_type_probability is not None
+        else (runtime_result.meaningful_probability or 0.5)
+    )
+
+    model_result = EventClassificationResult(
+        event_type=event_type,
+        severity=severity,
+        severity_score=score,
+        confidence=confidence,
+        is_night=night,
+        is_meaningful=is_meaningful,
+        rule_hits=["lgbm_model"],
+        features=dict(rule_result.features),
+    )
+    return _append_runtime_metadata(
+        model_result,
+        backend="lgbm",
+        runtime_result=runtime_result,
+    )
+
+
+def classify_event(
+    event: EventFeatures,
+    settings: AISettings | None = None,
+    runtime: RuntimePredictor | None = None,
+) -> EventClassificationResult:
+    """
+    Classify one event feature into event type and severity.
+
+    Contract:
+    - `event.recent_count_10min` must be "count of meaningful events in the
+      last 10 minutes".
+    - Raw log/sample count must not be passed.
+
+    Backend policy:
+    - rule: always use rule-based classifier
+    - hybrid/lightgbm: try LightGBM first, fallback to rule on runtime/model issues
+      or low confidence
+    """
+    cfg = settings or get_settings()
+    rule_result = _classify_event_rule(event=event, cfg=cfg)
+    backend = cfg.classifier.backend
+
+    if backend == "rule":
+        return _append_runtime_metadata(rule_result, backend="rule")
+
+    runtime_obj: RuntimePredictor
+    if runtime is not None:
+        runtime_obj = runtime
+    elif settings is None:
+        runtime_obj = get_lgbm_runtime()
+    else:
+        runtime_obj = LightGBMRuntime(settings=cfg)
+
+    model_or_fallback = _classify_event_lightgbm_or_fallback(
+        event=event,
+        cfg=cfg,
+        rule_result=rule_result,
+        runtime=runtime_obj,
+    )
+    if backend == "hybrid":
+        return _append_runtime_metadata(
+            model_or_fallback,
+            backend=f"hybrid/{model_or_fallback.features.get('classifier_backend', 'unknown')}",
+        )
+    return model_or_fallback

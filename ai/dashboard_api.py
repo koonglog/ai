@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
 import os
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
@@ -16,11 +18,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
-from .config import get_settings
+from .config import AISettings, ClassifierSettings, get_settings
 from .event_classifier import classify_event, is_meaningful_event
+from .lgbm_runtime import LightGBMRuntime
 from .message_generator import generate_mediation_message
 from .pattern_analyzer import analyze_patterns
-from .schemas import EventFeatures
+from .schemas import EventClassificationResult, EventFeatures
 
 
 @dataclass(frozen=True)
@@ -592,6 +595,115 @@ def _count_high_or_critical_in_window(
     )
 
 
+def _classifier_settings_with_backend(
+    settings: AISettings,
+    backend: str,
+) -> ClassifierSettings:
+    return replace(settings.classifier, backend=backend)
+
+
+def _to_serializable_classification(result: EventClassificationResult) -> dict[str, Any]:
+    return {
+        "event_type": result.event_type,
+        "severity": result.severity,
+        "severity_score": result.severity_score,
+        "confidence": float(result.confidence),
+        "is_night": result.is_night,
+        "is_meaningful": result.is_meaningful,
+        "rule_hits": list(result.rule_hits),
+        "classifier_backend": str(result.features.get("classifier_backend", "")),
+    }
+
+
+def _append_shadow_log(
+    *,
+    settings: AISettings,
+    route: str,
+    event: EventFeatures,
+    primary: EventClassificationResult,
+    rule_result: EventClassificationResult,
+    lgbm_result: EventClassificationResult,
+) -> None:
+    payload = {
+        "logged_at_utc": datetime.now(timezone.utc).isoformat(),
+        "route": route,
+        "input": {
+            "sensor_id": event.device_id,
+            "source": event.source,
+            "timestamp": event.timestamp.isoformat(),
+            "sound_level": float(event.sound_level),
+            "vibration_value": int(event.vibration_value),
+            "duration_ms": int(event.duration_ms),
+            "accel_delta": float(event.accel_delta),
+            "recent_count_10min": int(event.recent_count_10min),
+        },
+        "settings": {
+            "primary_backend": settings.classifier.backend,
+            "shadow_mode": settings.classifier.lgbm_shadow_mode,
+            "min_confidence": float(settings.classifier.lgbm_min_confidence),
+            "model_dir": settings.classifier.lgbm_model_dir,
+        },
+        "primary": _to_serializable_classification(primary),
+        "rule": _to_serializable_classification(rule_result),
+        "lightgbm": _to_serializable_classification(lgbm_result),
+        "diff": {
+            "primary_vs_rule_event_type": primary.event_type != rule_result.event_type,
+            "primary_vs_lgbm_event_type": primary.event_type != lgbm_result.event_type,
+            "rule_vs_lgbm_event_type": rule_result.event_type != lgbm_result.event_type,
+            "rule_vs_lgbm_severity": rule_result.severity != lgbm_result.severity,
+            "rule_vs_lgbm_is_meaningful": rule_result.is_meaningful != lgbm_result.is_meaningful,
+            "rule_vs_lgbm_confidence_delta": round(
+                float(lgbm_result.confidence) - float(rule_result.confidence),
+                6,
+            ),
+        },
+    }
+
+    try:
+        log_path = Path(settings.classifier.lgbm_shadow_log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        # Shadow logging must never break request processing.
+        return
+
+
+def _classify_event_with_shadow(
+    *,
+    event: EventFeatures,
+    settings: AISettings,
+    route: str,
+) -> EventClassificationResult:
+    runtime: LightGBMRuntime | None = None
+    if settings.classifier.backend != "rule" or settings.classifier.lgbm_shadow_mode:
+        runtime = LightGBMRuntime(settings=settings)
+
+    primary = classify_event(event=event, settings=settings, runtime=runtime)
+    if not settings.classifier.lgbm_shadow_mode:
+        return primary
+
+    rule_settings = replace(
+        settings,
+        classifier=_classifier_settings_with_backend(settings, "rule"),
+    )
+    lgbm_settings = replace(
+        settings,
+        classifier=_classifier_settings_with_backend(settings, "lightgbm"),
+    )
+    rule_result = classify_event(event=event, settings=rule_settings, runtime=runtime)
+    lgbm_result = classify_event(event=event, settings=lgbm_settings, runtime=runtime)
+    _append_shadow_log(
+        settings=settings,
+        route=route,
+        event=event,
+        primary=primary,
+        rule_result=rule_result,
+        lgbm_result=lgbm_result,
+    )
+    return primary
+
+
 def create_dashboard_app() -> FastAPI:
     app = FastAPI(title="KoongLog AI Dashboard API", version="0.1.0")
 
@@ -618,7 +730,11 @@ def create_dashboard_app() -> FastAPI:
             feature_in=payload.event_feature,
             recent_context_events=recent_context_events,
         )
-        classification = classify_event(event=event_features, settings=settings)
+        classification = _classify_event_with_shadow(
+            event=event_features,
+            settings=settings,
+            route="/api/v1/ai/classify-event",
+        )
         return {
             "status": "success",
             "classification": {
@@ -707,7 +823,11 @@ def create_dashboard_app() -> FastAPI:
                 recent_count_10min=_count_recent_meaningful_events(recent_context_events, sensor_ts),
             )
 
-        classification = classify_event(event=event_features, settings=settings)
+        classification = _classify_event_with_shadow(
+            event=event_features,
+            settings=settings,
+            route="/api/v1/ai/analyze",
+        )
 
         noise_events = _normalize_noise_events(payload.noise_events)
         if not noise_events and payload.recent_noise_logs:

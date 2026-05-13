@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 
@@ -126,6 +126,26 @@ class OpenAISettings:
 
 
 @dataclass(frozen=True)
+class ClassifierSettings:
+    """Classifier backend settings."""
+
+    backend: str = "rule"  # rule | hybrid | lightgbm
+    lgbm_model_dir: str = "./ai/artifacts/models"
+    lgbm_min_confidence: float = 0.7
+    lgbm_shadow_mode: bool = False
+    lgbm_shadow_log_path: str = "./ai/artifacts/logs/lgbm_shadow.jsonl"
+
+    def validate(self) -> None:
+        allowed = {"rule", "hybrid", "lightgbm"}
+        if self.backend not in allowed:
+            raise ValueError(
+                f"AI_CLASSIFIER_BACKEND must be one of {sorted(allowed)} (got: {self.backend})"
+            )
+        if not (0.0 <= self.lgbm_min_confidence <= 1.0):
+            raise ValueError("AI_LGBM_MIN_CONFIDENCE must be in range 0.0..1.0")
+
+
+@dataclass(frozen=True)
 class AISettings:
     """Top-level AI settings container."""
 
@@ -133,6 +153,7 @@ class AISettings:
     nighttime: NightTimeSettings
     pattern: PatternSettings
     openai: OpenAISettings
+    classifier: ClassifierSettings = field(default_factory=ClassifierSettings)
 
     @classmethod
     def from_env(cls) -> "AISettings":
@@ -198,11 +219,24 @@ class AISettings:
             reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT", "minimal"),
         )
 
+        classifier = ClassifierSettings(
+            backend=os.getenv("AI_CLASSIFIER_BACKEND", "rule").strip().lower(),
+            lgbm_model_dir=os.getenv("AI_LGBM_MODEL_DIR", "./ai/artifacts/models"),
+            lgbm_min_confidence=_to_float(os.getenv("AI_LGBM_MIN_CONFIDENCE"), 0.7),
+            lgbm_shadow_mode=_to_bool(os.getenv("AI_LGBM_SHADOW_MODE"), False),
+            lgbm_shadow_log_path=os.getenv(
+                "AI_LGBM_SHADOW_LOG_PATH",
+                "./ai/artifacts/logs/lgbm_shadow.jsonl",
+            ),
+        )
+        classifier.validate()
+
         return cls(
             thresholds=thresholds,
             nighttime=nighttime,
             pattern=pattern,
             openai=openai_settings,
+            classifier=classifier,
         )
 
 

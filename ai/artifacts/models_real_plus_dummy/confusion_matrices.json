@@ -1,0 +1,40 @@
+{
+  "split_train_ratio": 0.6,
+  "binary_labels": [
+    0,
+    1
+  ],
+  "binary_confusion_matrix": [
+    [
+      226,
+      337
+    ],
+    [
+      17,
+      580
+    ]
+  ],
+  "event_type_labels": [
+    "daily_noise",
+    "repeated_vibration",
+    "impact_noise"
+  ],
+  "event_type_confusion_matrix": [
+    [
+      163,
+      10,
+      0
+    ],
+    [
+      7,
+      185,
+      0
+    ],
+    [
+      0,
+      0,
+      232
+    ]
+  ],
+  "event_type_eval_rows": 597
+}

@@ -1,0 +1,53 @@
+{
+  "created_at_utc": "2026-05-13T05:55:38.977271+00:00",
+  "dataset_path": "ai\\artifacts\\datasets\\real_plus_dummy\\lgbm_training_dataset_real_plus_dummy.csv",
+  "model_dir": "ai\\artifacts\\models_real_plus_dummy",
+  "timestamp_column": "sensor_timestamp",
+  "train_ratio": 0.6,
+  "validation_rows": 1160,
+  "validation_binary_distribution": {
+    "0": 563,
+    "1": 597
+  },
+  "event_type_validation_rows": 597,
+  "event_type_validation_distribution": {
+    "0": 173,
+    "1": 192,
+    "2": 232
+  },
+  "meaningful_threshold": 0.5,
+  "is_meaningful_metrics": {
+    "accuracy": 0.6948275862068966,
+    "precision": 0.6324972737186477,
+    "recall": 0.9715242881072027,
+    "f1": 0.7661822985468957,
+    "average_precision": 0.6086003013388344,
+    "roc_auc": 0.6225800405223274
+  },
+  "event_type_metrics": {
+    "accuracy": 0.9715242881072027,
+    "macro_f1": 0.968836556401815,
+    "weighted_f1": 0.9715101297312304,
+    "per_class": {
+      "daily_noise": {
+        "precision": 0.9588235294117647,
+        "recall": 0.9421965317919075,
+        "f1": 0.9504373177842566,
+        "support": 173
+      },
+      "repeated_vibration": {
+        "precision": 0.9487179487179487,
+        "recall": 0.9635416666666666,
+        "f1": 0.9560723514211886,
+        "support": 192
+      },
+      "impact_noise": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 232
+      }
+    },
+    "roc_auc_ovr": 0.9974751091229902
+  }
+}

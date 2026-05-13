@@ -1,0 +1,71 @@
+{
+  "rows_total": 2898,
+  "source_distribution": {
+    "dummy": 2000,
+    "real": 898
+  },
+  "label_distribution": {
+    "0": 1079,
+    "1": 1819
+  },
+  "event_type_distribution_positive": {
+    "impact_noise": 561,
+    "repeated_vibration": 594,
+    "daily_noise": 664
+  },
+  "timestamp_min": "2026-05-01 00:11:32.612173",
+  "timestamp_max": "2026-05-21 23:56:59.299426",
+  "split_diagnostics": {
+    "0.8": {
+      "valid_rows": 580,
+      "valid_label_distribution": {
+        "0": 187,
+        "1": 393
+      },
+      "valid_event_type_distribution": {
+        "impact_noise": 149,
+        "repeated_vibration": 130,
+        "daily_noise": 114
+      },
+      "valid_source_distribution": {
+        "dummy": 580
+      }
+    },
+    "0.7": {
+      "valid_rows": 870,
+      "valid_label_distribution": {
+        "0": 281,
+        "1": 589
+      },
+      "valid_event_type_distribution": {
+        "impact_noise": 227,
+        "daily_noise": 172,
+        "repeated_vibration": 190
+      },
+      "valid_source_distribution": {
+        "real": 29,
+        "dummy": 841
+      }
+    },
+    "0.6": {
+      "valid_rows": 1160,
+      "valid_label_distribution": {
+        "0": 563,
+        "1": 597
+      },
+      "valid_event_type_distribution": {
+        "impact_noise": 232,
+        "repeated_vibration": 192,
+        "daily_noise": 173
+      },
+      "valid_source_distribution": {
+        "dummy": 850,
+        "real": 310
+      }
+    }
+  },
+  "paths": {
+    "out_csv": "C:\\Users\\SAMSUNG\\Documents\\New project 2\\ai\\artifacts\\datasets\\real_plus_dummy\\lgbm_training_dataset_real_plus_dummy.csv",
+    "summary_json": "C:\\Users\\SAMSUNG\\Documents\\New project 2\\ai\\artifacts\\datasets\\real_plus_dummy\\merge_summary.json"
+  }
+}

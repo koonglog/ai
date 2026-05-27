@@ -1,0 +1,28 @@
+{
+  "feature_spec_version": "1.1.0",
+  "feature_columns": [
+    "sound_level",
+    "vibration_value",
+    "duration_ms",
+    "hour_of_day",
+    "is_night",
+    "recent_count_10min",
+    "sound_over_impact_leq",
+    "sound_over_impact_lmax",
+    "sound_over_airborne_leq",
+    "vibration_over_low",
+    "vibration_over_mid",
+    "vibration_over_high",
+    "duration_over_short_ms",
+    "duration_over_medium_ms",
+    "duration_over_long_ms"
+  ],
+  "nighttime_window": {
+    "start_hour": 22,
+    "end_hour": 6
+  },
+  "notes": {
+    "missing_numeric_default": 0.0,
+    "recent_count_10min_min": 0
+  }
+}

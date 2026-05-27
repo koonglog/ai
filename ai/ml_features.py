@@ -9,12 +9,11 @@ from typing import Any, Mapping, Sequence
 from .config import AISettings, get_settings
 from .schemas import EventFeatures
 
-FEATURE_SPEC_VERSION = "1.0.0"
+FEATURE_SPEC_VERSION = "1.1.0"
 FEATURE_COLUMNS: list[str] = [
     "sound_level",
     "vibration_value",
     "duration_ms",
-    "accel_delta",
     "hour_of_day",
     "is_night",
     "recent_count_10min",
@@ -137,7 +136,6 @@ def feature_dict_from_event(
     sound_level = _safe_float(event.sound_level, 0.0)
     vibration_value = max(0, _safe_int(event.vibration_value, 0))
     duration_ms = max(0, _safe_int(event.duration_ms, 0))
-    accel_delta = max(0.0, _safe_float(event.accel_delta, 0.0))
     recent_count_10min = max(0, _safe_int(event.recent_count_10min, 0))
 
     ts = event.timestamp
@@ -154,7 +152,6 @@ def feature_dict_from_event(
         "sound_level": sound_level,
         "vibration_value": float(vibration_value),
         "duration_ms": float(duration_ms),
-        "accel_delta": accel_delta,
         "hour_of_day": hour_of_day,
         "is_night": 1.0 if night else 0.0,
         "recent_count_10min": float(recent_count_10min),

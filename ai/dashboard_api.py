@@ -709,15 +709,31 @@ def create_dashboard_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, Any]:
+        settings = get_settings()
+        model_status: dict[str, Any] | None = None
+        if settings.classifier.backend != "rule" or settings.classifier.lgbm_shadow_mode:
+            model_status = LightGBMRuntime(settings=settings).status()
+
+        dashboard_db: dict[str, Any]
         try:
             schema = get_schema()
+            dashboard_db = {
+                "status": "ok",
+                "noise_table": schema.noise_table,
+                "household_table": schema.household_table,
+                "mediation_table": schema.mediation_table,
+            }
         except Exception as exc:  # pragma: no cover - runtime safety
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            dashboard_db = {
+                "status": "unavailable",
+                "error": str(exc),
+            }
+
         return {
             "status": "ok",
-            "noise_table": schema.noise_table,
-            "household_table": schema.household_table,
-            "mediation_table": schema.mediation_table,
+            "classifier_backend": settings.classifier.backend,
+            "model": model_status,
+            "dashboard_db": dashboard_db,
         }
 
     @app.post("/api/v1/ai/classify-event")

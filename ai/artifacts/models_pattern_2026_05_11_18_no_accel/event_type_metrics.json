@@ -1,0 +1,79 @@
+{
+  "created_at_utc": "2026-05-18T06:19:04.969109+00:00",
+  "task": "event_type_multiclass_classification",
+  "dataset_path": "C:\\Users\\SAMSUNG\\Documents\\New project 2\\ai\\artifacts\\datasets\\synthetic_2026_05_11_18\\lgbm_pattern_training_dataset_no_accel.csv",
+  "timestamp_column": "sensor_timestamp",
+  "feature_columns": [
+    "sound_level",
+    "vibration_value",
+    "duration_ms",
+    "hour_of_day",
+    "is_night",
+    "recent_count_10min",
+    "sound_over_impact_leq",
+    "sound_over_impact_lmax",
+    "sound_over_airborne_leq",
+    "vibration_over_low",
+    "vibration_over_mid",
+    "vibration_over_high",
+    "duration_over_short_ms",
+    "duration_over_medium_ms",
+    "duration_over_long_ms"
+  ],
+  "class_names": [
+    "repeated_vibration",
+    "impact_noise"
+  ],
+  "train_ratio": 0.8,
+  "seed": 42,
+  "model_params": {
+    "objective": "multiclass",
+    "num_class": 2,
+    "n_estimators": 500,
+    "learning_rate": 0.05,
+    "num_leaves": 31,
+    "class_weight": "balanced",
+    "early_stopping_rounds": 50,
+    "best_iteration": 258
+  },
+  "data_summary": {
+    "total_rows_input": 1655,
+    "total_rows_filtered": 977,
+    "train_rows": 781,
+    "valid_rows": 196,
+    "train_label_distribution": {
+      "0": 714,
+      "1": 67
+    },
+    "valid_label_distribution": {
+      "0": 162,
+      "1": 34
+    }
+  },
+  "validation_metrics": {
+    "accuracy": 1.0,
+    "macro_f1": 1.0,
+    "weighted_f1": 1.0,
+    "per_class": {
+      "repeated_vibration": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 162
+      },
+      "impact_noise": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 34
+      }
+    },
+    "roc_auc_ovr": 1.0
+  },
+  "artifacts": {
+    "model_txt": "C:\\Users\\SAMSUNG\\Documents\\New project 2\\ai\\artifacts\\models_pattern_2026_05_11_18_no_accel\\event_type_model.txt",
+    "metrics_json": "C:\\Users\\SAMSUNG\\Documents\\New project 2\\ai\\artifacts\\models_pattern_2026_05_11_18_no_accel\\event_type_metrics.json",
+    "feature_spec_json": "C:\\Users\\SAMSUNG\\Documents\\New project 2\\ai\\artifacts\\models_pattern_2026_05_11_18_no_accel\\feature_spec.json",
+    "label_map_json": "C:\\Users\\SAMSUNG\\Documents\\New project 2\\ai\\artifacts\\models_pattern_2026_05_11_18_no_accel\\event_type_label_map.json"
+  }
+}

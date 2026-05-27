@@ -1,0 +1,10 @@
+{
+  "label_to_id": {
+    "repeated_vibration": 0,
+    "impact_noise": 1
+  },
+  "id_to_label": [
+    "repeated_vibration",
+    "impact_noise"
+  ]
+}

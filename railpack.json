@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "buildAptPackages": [
+    "libgomp1"
+  ],
+  "deploy": {
+    "aptPackages": [
+      "libgomp1"
+    ]
+  }
+}

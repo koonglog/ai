@@ -30,6 +30,9 @@ The repository includes `railway.json`, which tells Railway to:
 - use `/health` as the healthcheck path
 - restart on failure
 
+The repository also includes `railpack.json`, which installs `libgomp1` in the
+runtime image for LightGBM.
+
 After deployment, generate a Railway domain from:
 
 ```text

@@ -26,7 +26,7 @@ ENABLE_OPENAI=true
 
 The repository includes `railway.json`, which tells Railway to:
 
-- run `python -m uvicorn ai.dashboard_api:app --host 0.0.0.0 --port ${PORT:-8001}`
+- run `python -m ai.serve`
 - use `/health` as the healthcheck path
 - restart on failure
 

@@ -1,0 +1,14 @@
+{
+  "label_to_id": {
+    "normal": 0,
+    "caution": 1,
+    "warning": 2,
+    "high": 3
+  },
+  "id_to_label": [
+    "normal",
+    "caution",
+    "warning",
+    "high"
+  ]
+}

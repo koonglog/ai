@@ -352,7 +352,7 @@ def test_analyze_route_blocks_repeated_vibration_when_only_raw_like_recent_logs(
     assert body["pattern_result"]["recent_count_10min"] == 0
 
 
-def test_analyze_route_repeated_vibration_uses_meaningful_event_count(monkeypatch) -> None:
+def test_analyze_route_repeated_vibration_uses_impact_window_count(monkeypatch) -> None:
     db_url = _new_db_url()
     monkeypatch.setenv("BACKEND_DB_URL", db_url)
     monkeypatch.setenv("ENABLE_OPENAI", "false")
@@ -364,27 +364,24 @@ def test_analyze_route_repeated_vibration_uses_meaningful_event_count(monkeypatc
         "sensor_id": "SENSOR-A101-01",
         "source": "arduino",
         "event_feature": {
-            "sound_level": 48.0,
-            "vibration_value": 420,
+            "sound_level": 38.0,
+            "vibration_value": 60,
             "duration_ms": 3000,
             "accel_delta": 0.02,
             "timestamp": now.isoformat(),
         },
         "recent_meaningful_events_10min": [
             {
-                "detected_at": (now - timedelta(minutes=2)).isoformat(),
+                "detected_at": (now - timedelta(seconds=3)).isoformat(),
                 "event_type": "impact_noise",
                 "severity": "high",
+                "avg_vibration": 60,
             },
             {
-                "detected_at": (now - timedelta(minutes=4)).isoformat(),
+                "detected_at": (now - timedelta(seconds=6)).isoformat(),
                 "event_type": "impact_noise",
                 "severity": "high",
-            },
-            {
-                "detected_at": (now - timedelta(minutes=8)).isoformat(),
-                "event_type": "repeated_vibration",
-                "severity": "medium",
+                "avg_vibration": 60,
             },
         ],
     }
@@ -393,7 +390,9 @@ def test_analyze_route_repeated_vibration_uses_meaningful_event_count(monkeypatc
     assert res.status_code == 200
     body = res.json()
     assert body["noise_log"]["event_type"] == "repeated_vibration"
-    assert body["pattern_result"]["recent_count_10min"] == 3
+    assert body["noise_log"]["impact_count"] == 3
+    assert body["pattern_result"]["impact_count"] == 3
+    assert body["pattern_result"]["recent_count_10min"] == 2
 
 
 def test_analyze_route_uses_noise_events_only_for_7day_analysis(monkeypatch) -> None:
@@ -494,6 +493,40 @@ def test_classify_event_route(monkeypatch) -> None:
     }
     assert body["classification"]["severity"] in {"low", "medium", "high", "critical"}
     assert isinstance(body["classification"]["is_meaningful"], bool)
+
+
+def test_classify_event_route_resolves_sensor_timestamp_metadata(monkeypatch) -> None:
+    db_url = _new_db_url()
+    monkeypatch.setenv("BACKEND_DB_URL", db_url)
+    _seed_db(db_url)
+    client = _build_client(db_url)
+
+    payload = {
+        "sensor_id": "SENSOR-A101-01",
+        "household_id": 1,
+        "source": "backend",
+        "sensor_timestamp": "2026-05-11T22:00:00",
+        "timestamp": "2026-05-11T21:59:00",
+        "event_feature": {
+            "sound_level": 45.2,
+            "vibration_value": 19.3,
+            "duration_ms": 2000,
+            "accel_delta": 0.01,
+        },
+    }
+
+    res = client.post("/api/v1/ai/classify-event", json=payload)
+
+    assert res.status_code == 200
+    classification = res.json()["classification"]
+    assert classification["timestamp_source"] == "sensor_timestamp"
+    assert classification["timestamp_conflict"] is True
+    assert classification["resolved_timestamp"] == "2026-05-11T22:00:00+09:00"
+    assert classification["time_period"] == "nighttime"
+    assert classification["is_night"] is True
+    assert classification["is_daytime"] is False
+    assert classification["is_nighttime"] is True
+    assert classification["vibration_raw"] == 19.3
 
 
 def test_analyze_patterns_route(monkeypatch) -> None:
@@ -617,7 +650,7 @@ def test_analyze_response_schema_unchanged_when_lightgbm_falls_back(monkeypatch)
     assert body["status"] == "success"
 
     noise_log_keys = set(body["noise_log"].keys())
-    assert noise_log_keys == {
+    required_noise_log_keys = {
         "id",
         "sensor_id",
         "household_id",
@@ -627,7 +660,22 @@ def test_analyze_response_schema_unchanged_when_lightgbm_falls_back(monkeypatch)
         "confidence",
         "is_night",
         "is_meaningful",
+        "noise_risk_level",
+        "vibration_raw",
+        "vibration_acc_mps2",
+        "vibration_dbv",
+        "reason",
+        "time_period",
+        "impact_count",
         "timestamp",
     }
+    assert required_noise_log_keys.issubset(noise_log_keys)
+    assert {
+        "is_daytime",
+        "is_nighttime",
+        "resolved_timestamp",
+        "timestamp_source",
+        "timestamp_conflict",
+    }.issubset(noise_log_keys)
     assert "classifier_backend" not in body["noise_log"]
     assert "rule_hits" not in body["noise_log"]

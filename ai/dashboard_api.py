@@ -24,6 +24,12 @@ from .lgbm_runtime import LightGBMRuntime
 from .message_generator import generate_mediation_message
 from .pattern_analyzer import analyze_patterns
 from .schemas import EventClassificationResult, EventFeatures
+from .time_utils import as_kst, resolve_event_timestamp
+from .vibration import (
+    IMPACT_WINDOW_SECONDS,
+    build_vibration_risk_profile,
+    category_is_caution_or_higher,
+)
 
 
 @dataclass(frozen=True)
@@ -73,17 +79,28 @@ class AnalyzeEventFeatureIn(BaseModel):
     vibration_value: float
     duration_ms: int = 0
     accel_delta: float = 0.0
+    sensor_timestamp: datetime | None = None
     timestamp: datetime | None = None
+    received_at: datetime | None = None
     # Contract: meaningful-event count in last 10 minutes only.
     recent_count_10min: int | None = Field(default=None, ge=0)
+    # Count of caution-or-higher vibration impacts in the last 10 seconds,
+    # including the current reading when supplied by the caller.
+    impact_count_in_window: int | None = Field(default=None, ge=0)
 
 
 class AnalyzeNoiseEventIn(BaseModel):
+    sensor_timestamp: datetime | None = None
     detected_at: datetime | None = None
+    started_at: datetime | None = None
     timestamp: datetime | None = None
+    received_at: datetime | None = None
     event_type: str | None = None
     severity: str | None = None
     is_meaningful: bool | None = None
+    vibration_value: float | None = None
+    vibration_raw: float | None = None
+    avg_vibration: float | None = None
 
 
 class AnalyzeMediationMessageIn(BaseModel):
@@ -101,7 +118,9 @@ class AnalyzeRequestIn(BaseModel):
     sound_level: float | None = None
     vibration_value: float | None = None
     duration_ms: int | None = None
+    sensor_timestamp: datetime | None = None
     timestamp: datetime | None = None
+    received_at: datetime | None = None
     acceleration: dict[str, float] | None = None
 
     # Optional context for richer AI analysis.
@@ -125,6 +144,9 @@ class ClassifyEventRequestIn(BaseModel):
     sensor_id: str
     source: str = "backend"
     household_id: int | None = None
+    sensor_timestamp: datetime | None = None
+    timestamp: datetime | None = None
+    received_at: datetime | None = None
     event_feature: AnalyzeEventFeatureIn
     recent_meaningful_events_10min: list[AnalyzeNoiseEventIn] = Field(default_factory=list)
 
@@ -163,6 +185,10 @@ def _to_naive_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _to_kst_naive(dt: datetime) -> datetime:
+    return as_kst(dt).replace(tzinfo=None)
 
 
 def _choose(candidates: list[str], available: set[str], required: bool = False) -> str | None:
@@ -300,7 +326,7 @@ def _query_noise_logs(
         event_type = str(record.get("event_type") or "").strip() or None
         severity = str(record.get("severity") or "").strip() or None
         sound = float(record.get("sound_level") or 0.0)
-        vibration = int(float(record.get("vibration_value") or 0))
+        vibration = float(record.get("vibration_value") or 0.0)
         duration_ms = int(record.get("duration_ms") or 0)
 
         if event_type is None or severity is None:
@@ -519,19 +545,32 @@ def _calc_accel_delta_from_vector(acceleration: dict[str, float] | None) -> floa
 def _normalize_noise_events(events: list[AnalyzeNoiseEventIn]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for event in events:
-        dt = event.detected_at or event.timestamp
-        if dt is None:
+        timestamp_resolution = resolve_event_timestamp(
+            {
+                "sensor_timestamp": event.sensor_timestamp,
+                "timestamp": event.detected_at or event.started_at or event.timestamp,
+                "received_at": event.received_at,
+            },
+            fallback_to_now=False,
+        )
+        if timestamp_resolution is None:
             continue
         event_type = str(event.event_type or "").strip()
         severity = str(event.severity or "").strip()
         if not event_type or not severity:
             continue
+        vibration_raw = event.vibration_raw
+        if vibration_raw is None:
+            vibration_raw = event.vibration_value
+        if vibration_raw is None:
+            vibration_raw = event.avg_vibration
         normalized.append(
             {
-                "detected_at": _to_naive_utc(dt),
+                "detected_at": _to_kst_naive(timestamp_resolution.resolved_timestamp),
                 "event_type": event_type,
                 "severity": severity,
                 "is_meaningful": event.is_meaningful,
+                "vibration_raw": vibration_raw,
             }
         )
     return normalized
@@ -555,29 +594,97 @@ def _count_recent_meaningful_events(
     return count
 
 
+def _count_recent_caution_vibration_impacts(
+    recent_events: list[dict[str, Any]],
+    reference_time: datetime,
+    settings: AISettings,
+) -> int:
+    count = 0
+    for row in recent_events:
+        dt = row["detected_at"]
+        seconds = (reference_time - dt).total_seconds()
+        if seconds < 0 or seconds > IMPACT_WINDOW_SECONDS:
+            continue
+
+        raw = row.get("vibration_raw")
+        if raw is not None:
+            profile = build_vibration_risk_profile(
+                vibration_value=raw,
+                timestamp=dt,
+                settings=settings,
+                impact_count_in_window=0,
+            )
+            if category_is_caution_or_higher(profile.vibration_level_category):
+                count += 1
+            continue
+
+        # Backward-compatible fallback for older callers that only send
+        # classified event rows.
+        is_meaningful = row.get("is_meaningful")
+        if is_meaningful is None:
+            is_meaningful = is_meaningful_event(row["event_type"], row["severity"])
+        if is_meaningful and row["event_type"] in {"impact_noise", "repeated_vibration"}:
+            count += 1
+    return count
+
+
 def _build_event_features(
     *,
     sensor_id: str,
     source: str,
     feature_in: AnalyzeEventFeatureIn,
-    fallback_timestamp: datetime | None = None,
+    settings: AISettings,
+    sensor_timestamp: datetime | None = None,
+    timestamp: datetime | None = None,
+    received_at: datetime | None = None,
     recent_context_events: list[dict[str, Any]] | None = None,
 ) -> tuple[datetime, EventFeatures]:
-    sensor_ts = _to_naive_utc(feature_in.timestamp or fallback_timestamp or datetime.now(timezone.utc))
+    timestamp_resolution = resolve_event_timestamp(
+        {
+            "sensor_timestamp": sensor_timestamp,
+            "timestamp": timestamp,
+            "received_at": received_at,
+            "event_feature": feature_in,
+        }
+    )
+    assert timestamp_resolution is not None
+    sensor_ts = _to_kst_naive(timestamp_resolution.resolved_timestamp)
+    classifier_ts = timestamp_resolution.resolved_timestamp
     recent_count_10min = (
         int(feature_in.recent_count_10min)
         if feature_in.recent_count_10min is not None
         else _count_recent_meaningful_events(recent_context_events or [], sensor_ts)
     )
+    vibration_raw = max(0.0, float(feature_in.vibration_value))
+    if feature_in.impact_count_in_window is not None:
+        impact_count_in_window = int(feature_in.impact_count_in_window)
+    else:
+        current_profile = build_vibration_risk_profile(
+            vibration_value=vibration_raw,
+            timestamp=classifier_ts,
+            settings=settings,
+            impact_count_in_window=0,
+        )
+        impact_count_in_window = _count_recent_caution_vibration_impacts(
+            recent_context_events or [],
+            sensor_ts,
+            settings,
+        )
+        if category_is_caution_or_higher(current_profile.vibration_level_category):
+            impact_count_in_window += 1
+
     event_features = EventFeatures(
         device_id=sensor_id,
         source=source,
         sound_level=float(feature_in.sound_level),
-        vibration_value=int(feature_in.vibration_value),
+        vibration_value=vibration_raw,
         duration_ms=int(feature_in.duration_ms or 0),
         accel_delta=float(feature_in.accel_delta),
-        timestamp=sensor_ts,
+        timestamp=classifier_ts,
         recent_count_10min=recent_count_10min,
+        impact_count_in_window=impact_count_in_window,
+        timestamp_source=timestamp_resolution.timestamp_source,
+        timestamp_conflict=timestamp_resolution.timestamp_conflict,
     )
     return sensor_ts, event_features
 
@@ -610,8 +717,34 @@ def _to_serializable_classification(result: EventClassificationResult) -> dict[s
         "confidence": float(result.confidence),
         "is_night": result.is_night,
         "is_meaningful": result.is_meaningful,
+        **_risk_output_fields(result),
         "rule_hits": list(result.rule_hits),
         "classifier_backend": str(result.features.get("classifier_backend", "")),
+    }
+
+
+def _risk_output_fields(result: EventClassificationResult) -> dict[str, Any]:
+    resolved_timestamp = result.features.get("resolved_timestamp")
+    is_daytime = bool(result.features.get("is_daytime", not result.is_night))
+    is_nighttime = bool(result.features.get("is_nighttime", result.is_night))
+    return {
+        "noise_risk_level": result.noise_risk_level,
+        "vibration_raw": result.vibration_raw,
+        "vibration_acc_mps2": result.vibration_acc_mps2,
+        "vibration_dbv": result.vibration_dbv,
+        "reason": result.reason,
+        "time_period": result.time_period,
+        "is_daytime": is_daytime,
+        "is_nighttime": is_nighttime,
+        "resolved_timestamp": resolved_timestamp,
+        "timestamp_source": str(result.features.get("timestamp_source", "")),
+        "timestamp_conflict": bool(result.features.get("timestamp_conflict", False)),
+        "impact_count": result.impact_count,
+        "vibration_level_category": str(result.features.get("vibration_level_category", "")),
+        "repeated_impact_flag": bool(result.features.get("repeated_impact_flag", False)),
+        "prediction_path": str(result.features.get("prediction_path", "")),
+        "model_version": str(result.features.get("model_version", "")),
+        "feature_spec_version": str(result.features.get("feature_spec_version", "")),
     }
 
 
@@ -630,12 +763,15 @@ def _append_shadow_log(
         "input": {
             "sensor_id": event.device_id,
             "source": event.source,
-            "timestamp": event.timestamp.isoformat(),
+            "timestamp": as_kst(event.timestamp).isoformat(),
+            "timestamp_source": event.timestamp_source,
+            "timestamp_conflict": event.timestamp_conflict,
             "sound_level": float(event.sound_level),
-            "vibration_value": int(event.vibration_value),
+            "vibration_value": float(event.vibration_value),
             "duration_ms": int(event.duration_ms),
             "accel_delta": float(event.accel_delta),
             "recent_count_10min": int(event.recent_count_10min),
+            "impact_count_in_window": int(event.impact_count_in_window),
         },
         "settings": {
             "primary_backend": settings.classifier.backend,
@@ -744,6 +880,10 @@ def create_dashboard_app() -> FastAPI:
             sensor_id=payload.sensor_id,
             source=payload.source,
             feature_in=payload.event_feature,
+            settings=settings,
+            sensor_timestamp=payload.sensor_timestamp,
+            timestamp=payload.timestamp,
+            received_at=payload.received_at,
             recent_context_events=recent_context_events,
         )
         classification = _classify_event_with_shadow(
@@ -762,16 +902,21 @@ def create_dashboard_app() -> FastAPI:
                 "confidence": classification.confidence,
                 "is_night": classification.is_night,
                 "is_meaningful": classification.is_meaningful,
+                **_risk_output_fields(classification),
                 "timestamp": sensor_ts.isoformat(),
             },
         }
 
     @app.post("/api/v1/ai/analyze-patterns")
     def analyze_patterns_api(payload: AnalyzePatternsRequestIn) -> dict[str, Any]:
-        reference_time = _to_naive_utc(payload.reference_time or datetime.now(timezone.utc))
+        reference_resolution = resolve_event_timestamp(
+            {"timestamp": payload.reference_time}
+        )
+        assert reference_resolution is not None
+        reference_time = _to_kst_naive(reference_resolution.resolved_timestamp)
         noise_events = _normalize_noise_events(payload.noise_events)
         mediation_messages = [
-            {"created_at": _to_naive_utc(row.created_at)}
+            {"created_at": _to_kst_naive(row.created_at)}
             for row in payload.mediation_messages
         ]
         pattern_obj = analyze_patterns(
@@ -818,7 +963,10 @@ def create_dashboard_app() -> FastAPI:
                 sensor_id=payload.sensor_id,
                 source=payload.source,
                 feature_in=payload.event_feature,
-                fallback_timestamp=payload.timestamp,
+                settings=settings,
+                sensor_timestamp=payload.sensor_timestamp,
+                timestamp=payload.timestamp,
+                received_at=payload.received_at,
                 recent_context_events=recent_context_events,
             )
         else:
@@ -827,16 +975,36 @@ def create_dashboard_app() -> FastAPI:
                     status_code=422,
                     detail="event_feature is required (legacy raw fields require sound_level/vibration_value)",
                 )
-            sensor_ts = _to_naive_utc(payload.timestamp or datetime.now(timezone.utc))
+            timestamp_resolution = resolve_event_timestamp(payload)
+            assert timestamp_resolution is not None
+            sensor_ts = _to_kst_naive(timestamp_resolution.resolved_timestamp)
+            classifier_ts = timestamp_resolution.resolved_timestamp
+            vibration_raw = max(0.0, float(payload.vibration_value))
+            current_profile = build_vibration_risk_profile(
+                vibration_value=vibration_raw,
+                timestamp=classifier_ts,
+                settings=settings,
+                impact_count_in_window=0,
+            )
+            impact_count_in_window = _count_recent_caution_vibration_impacts(
+                recent_context_events,
+                sensor_ts,
+                settings,
+            )
+            if category_is_caution_or_higher(current_profile.vibration_level_category):
+                impact_count_in_window += 1
             event_features = EventFeatures(
                 device_id=payload.sensor_id,
                 source=payload.source,
                 sound_level=float(payload.sound_level),
-                vibration_value=int(payload.vibration_value),
+                vibration_value=vibration_raw,
                 duration_ms=int(payload.duration_ms or 0),
                 accel_delta=_calc_accel_delta_from_vector(payload.acceleration),
-                timestamp=sensor_ts,
+                timestamp=classifier_ts,
                 recent_count_10min=_count_recent_meaningful_events(recent_context_events, sensor_ts),
+                impact_count_in_window=impact_count_in_window,
+                timestamp_source=timestamp_resolution.timestamp_source,
+                timestamp_conflict=timestamp_resolution.timestamp_conflict,
             )
 
         classification = _classify_event_with_shadow(
@@ -861,7 +1029,7 @@ def create_dashboard_app() -> FastAPI:
         period_days = payload.analysis_period_days
         if payload.household_id is not None:
             mediation_messages = [
-                {"created_at": _to_naive_utc(row.created_at)}
+                {"created_at": _to_kst_naive(row.created_at)}
                 for row in payload.mediation_messages
             ]
             pattern_obj = analyze_patterns(
@@ -879,6 +1047,7 @@ def create_dashboard_app() -> FastAPI:
         needs_mediation = (
             (pattern_obj.needs_mediation if pattern_obj is not None else False)
             or classification.severity in {"medium", "high", "critical"}
+            or classification.noise_risk_level in {"caution", "warning", "high"}
             or total_count >= 3
             or high_count >= 2
             or night_count >= 2
@@ -891,6 +1060,7 @@ def create_dashboard_app() -> FastAPI:
             "needs_mediation": needs_mediation,
             "period_days": period_days,
             "recent_count_10min": event_features.recent_count_10min,
+            "impact_count": classification.impact_count,
             "needs_escalation": pattern_obj.needs_escalation if pattern_obj is not None else False,
             "pattern_label": (
                 pattern_obj.pattern_label
@@ -920,7 +1090,7 @@ def create_dashboard_app() -> FastAPI:
             event_context = {
                 "event_type": classification.event_type,
                 "severity": classification.severity,
-                "time_range": sensor_ts.strftime("%H:%M"),
+                "time_range": as_kst(event_features.timestamp).strftime("%H:%M"),
                 "event_count": event_count,
                 "pattern_summary": pattern_result["summary"],
                 "target_unit": payload.target_unit,
@@ -954,6 +1124,7 @@ def create_dashboard_app() -> FastAPI:
                 "confidence": classification.confidence,
                 "is_night": classification.is_night,
                 "is_meaningful": classification.is_meaningful,
+                **_risk_output_fields(classification),
                 "timestamp": sensor_ts.isoformat(),
             },
             "pattern_result": pattern_result,

@@ -1,0 +1,452 @@
+{
+  "created_at_utc": "2026-06-03T10:47:51.833339+00:00",
+  "model_name": "lgbm_noise_risk_feature_spec_2_0_0_base",
+  "dataset_path": "C:\\Users\\SAMSUNG\\Downloads\\koonglog_learning_data\\training_dataset_feature_spec_2_0_0.csv",
+  "pattern_events_path": "C:\\Users\\SAMSUNG\\Downloads\\koonglog_learning_data\\pattern_events_2026_05_11_18_no_accel.csv",
+  "pattern_events_usage": "post_training_validation_only_not_feature_not_target",
+  "feature_spec_version": "2.0.0",
+  "feature_names": [
+    "sound_level",
+    "vibration_raw",
+    "vibration_acc_mps2",
+    "vibration_dbv",
+    "duration_ms",
+    "hour_of_day",
+    "is_daytime",
+    "is_nighttime",
+    "vibration_level_category",
+    "impact_count_in_window",
+    "repeated_impact_flag",
+    "sound_over_impact_leq",
+    "sound_over_impact_lmax",
+    "sound_over_airborne_leq",
+    "duration_over_short_ms",
+    "duration_over_medium_ms",
+    "duration_over_long_ms"
+  ],
+  "target_column": "noise_risk_level",
+  "target_classes": [
+    "normal",
+    "caution",
+    "warning",
+    "high"
+  ],
+  "label_mapping": {
+    "normal": 0,
+    "caution": 1,
+    "warning": 2,
+    "high": 3
+  },
+  "categorical_features": [],
+  "forbidden_feature_columns": [
+    "confidence",
+    "event_type",
+    "feature_spec_version",
+    "id",
+    "is_meaningful",
+    "noise_risk_level",
+    "pattern_label",
+    "received_at",
+    "recent_count_10min",
+    "sensor_timestamp",
+    "severity",
+    "severity_score"
+  ],
+  "split_method": "time_based_sensor_timestamp_70_15_15",
+  "split": {
+    "train": {
+      "row_count": 90624,
+      "label_distribution": {
+        "normal": 52323,
+        "caution": 28477,
+        "warning": 6609,
+        "high": 3215
+      },
+      "sensor_id_distribution": {
+        "SENSOR-C303-01": 30212,
+        "SENSOR-B202-01": 30208,
+        "SENSOR-A101-01": 30204
+      },
+      "time_period_distribution": {
+        "daytime": 63656,
+        "nighttime": 26968
+      },
+      "timestamp_min": "2026-05-11 08:00:00.000000",
+      "timestamp_max": "2026-05-16 21:47:55.000000"
+    },
+    "validation": {
+      "row_count": 19420,
+      "label_distribution": {
+        "normal": 10984,
+        "caution": 6643,
+        "warning": 1153,
+        "high": 640
+      },
+      "sensor_id_distribution": {
+        "SENSOR-B202-01": 6476,
+        "SENSOR-A101-01": 6475,
+        "SENSOR-C303-01": 6469
+      },
+      "time_period_distribution": {
+        "daytime": 11872,
+        "nighttime": 7548
+      },
+      "timestamp_min": "2026-05-16 21:47:56.000000",
+      "timestamp_max": "2026-05-17 22:23:55.000000"
+    },
+    "test": {
+      "row_count": 19420,
+      "label_distribution": {
+        "normal": 10727,
+        "caution": 7060,
+        "warning": 1044,
+        "high": 589
+      },
+      "sensor_id_distribution": {
+        "SENSOR-B202-01": 6474,
+        "SENSOR-C303-01": 6474,
+        "SENSOR-A101-01": 6472
+      },
+      "time_period_distribution": {
+        "daytime": 10784,
+        "nighttime": 8636
+      },
+      "timestamp_min": "2026-05-17 22:23:56.000000",
+      "timestamp_max": "2026-05-18 22:59:59.000000"
+    }
+  },
+  "model_params": {
+    "objective": "multiclass",
+    "num_class": 4,
+    "n_estimators": 400,
+    "learning_rate": 0.05,
+    "num_leaves": 31,
+    "class_weight": "balanced",
+    "random_state": 42,
+    "early_stopping_rounds": 50,
+    "best_iteration": 398
+  },
+  "dataset_validation": {
+    "row_count": 129464,
+    "columns": [
+      "duration_ms",
+      "feature_spec_version",
+      "household_id",
+      "id",
+      "impact_count_in_window",
+      "is_daytime",
+      "is_nighttime",
+      "noise_risk_level",
+      "received_at",
+      "repeated_impact_flag",
+      "sensor_id",
+      "sensor_timestamp",
+      "sound_level",
+      "time_period",
+      "vibration_acc_mps2",
+      "vibration_dbv",
+      "vibration_level_category",
+      "vibration_raw",
+      "vibration_value"
+    ],
+    "missing_required_columns": [],
+    "wrong_feature_spec_version_count": 0,
+    "pattern_event_columns_present": [],
+    "vibration_raw_float_preserved": {
+      "fractional_vibration_value_count": 94326,
+      "vibration_value_raw_mismatch_count": 0
+    },
+    "non_finite_feature_counts": {
+      "sound_level": 0,
+      "vibration_raw": 0,
+      "vibration_acc_mps2": 0,
+      "vibration_dbv": 0,
+      "duration_ms": 0,
+      "hour_of_day": 0,
+      "is_daytime": 0,
+      "is_nighttime": 0,
+      "vibration_level_category": 0,
+      "impact_count_in_window": 0,
+      "repeated_impact_flag": 0,
+      "sound_over_impact_leq": 0,
+      "sound_over_impact_lmax": 0,
+      "sound_over_airborne_leq": 0,
+      "duration_over_short_ms": 0,
+      "duration_over_medium_ms": 0,
+      "duration_over_long_ms": 0
+    },
+    "noise_risk_level_distribution": {
+      "normal": 74034,
+      "caution": 42180,
+      "warning": 8806,
+      "high": 4444
+    },
+    "vibration_level_category_distribution": {
+      "normal": 85710,
+      "caution": 32003,
+      "warning": 7301,
+      "impact_risk": 4450
+    },
+    "sensor_id_distribution": {
+      "SENSOR-B202-01": 43158,
+      "SENSOR-C303-01": 43155,
+      "SENSOR-A101-01": 43151
+    },
+    "time_period_distribution": {
+      "daytime": 86312,
+      "nighttime": 43152
+    }
+  },
+  "pattern_event_validation_input": {
+    "row_count": 1655,
+    "columns": [
+      "avg_sound_level",
+      "avg_vibration",
+      "confidence",
+      "duration_ms",
+      "ended_at",
+      "event_type",
+      "household_id",
+      "id",
+      "is_meaningful",
+      "is_night",
+      "max_sound_level",
+      "pattern_label",
+      "recent_count_10min",
+      "sample_count",
+      "sensor_id",
+      "severity",
+      "severity_score",
+      "started_at",
+      "status"
+    ],
+    "missing_required_columns": [],
+    "missing_values": {
+      "sensor_id": 0,
+      "household_id": 0,
+      "event_type": 0,
+      "severity": 0,
+      "severity_score": 0,
+      "confidence": 0,
+      "is_night": 0,
+      "is_meaningful": 0,
+      "pattern_label": 0,
+      "avg_sound_level": 0,
+      "max_sound_level": 0,
+      "avg_vibration": 0,
+      "duration_ms": 0,
+      "sample_count": 0,
+      "started_at": 0,
+      "ended_at": 0,
+      "status": 0,
+      "recent_count_10min": 0
+    },
+    "timestamp_parse_errors": {
+      "started_at": 0,
+      "ended_at": 0
+    },
+    "event_type_distribution": {
+      "repeated_vibration": 876,
+      "daily_noise": 678,
+      "impact_noise": 101
+    },
+    "severity_distribution": {
+      "low": 627,
+      "high": 593,
+      "medium": 353,
+      "critical": 82
+    },
+    "pattern_label_distribution": {
+      "vibration_cluster": 876,
+      "recurring_noise": 492,
+      "no_pattern": 196,
+      "night_repeated_impact": 91
+    },
+    "is_meaningful_distribution": {
+      "1": 977,
+      "0": 678
+    },
+    "usage": "validation_only_not_training_feature_or_target"
+  },
+  "pattern_validation": {
+    "pattern_event_row_count": 1655,
+    "matched_pattern_event_count": 1655,
+    "match_rate": 1.0,
+    "unmatched_pattern_event_count": 0,
+    "unmatched_pattern_examples": [],
+    "matched_prediction_distribution": {
+      "normal": 4,
+      "caution": 149,
+      "warning": 505,
+      "high": 997
+    },
+    "no_pattern_prediction_distribution": {
+      "normal": 74030,
+      "caution": 42031,
+      "warning": 8301,
+      "high": 3447
+    },
+    "by_event_type": {
+      "daily_noise": {
+        "normal": 4,
+        "caution": 149,
+        "warning": 504,
+        "high": 21
+      },
+      "impact_noise": {
+        "normal": 0,
+        "caution": 0,
+        "warning": 0,
+        "high": 101
+      },
+      "repeated_vibration": {
+        "normal": 0,
+        "caution": 0,
+        "warning": 1,
+        "high": 875
+      }
+    },
+    "by_severity": {
+      "critical": {
+        "normal": 0,
+        "caution": 0,
+        "warning": 0,
+        "high": 82
+      },
+      "high": {
+        "normal": 0,
+        "caution": 0,
+        "warning": 0,
+        "high": 593
+      },
+      "low": {
+        "normal": 4,
+        "caution": 149,
+        "warning": 474,
+        "high": 0
+      },
+      "medium": {
+        "normal": 0,
+        "caution": 0,
+        "warning": 31,
+        "high": 322
+      }
+    },
+    "by_pattern_label": {
+      "night_repeated_impact": {
+        "normal": 0,
+        "caution": 0,
+        "warning": 0,
+        "high": 91
+      },
+      "no_pattern": {
+        "normal": 2,
+        "caution": 44,
+        "warning": 140,
+        "high": 10
+      },
+      "recurring_noise": {
+        "normal": 2,
+        "caution": 105,
+        "warning": 364,
+        "high": 21
+      },
+      "vibration_cluster": {
+        "normal": 0,
+        "caution": 0,
+        "warning": 1,
+        "high": 875
+      }
+    },
+    "by_is_meaningful": {
+      "0": {
+        "normal": 4,
+        "caution": 149,
+        "warning": 504,
+        "high": 21
+      },
+      "1": {
+        "normal": 0,
+        "caution": 0,
+        "warning": 1,
+        "high": 976
+      }
+    },
+    "mismatch_case_count": 3447,
+    "mismatch_cases_csv": "ai\\artifacts\\reports\\pattern_validation_mismatch_cases.csv"
+  },
+  "test_metrics": {
+    "accuracy": 1.0,
+    "macro_f1": 1.0,
+    "weighted_f1": 1.0,
+    "per_class": {
+      "normal": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 10727
+      },
+      "caution": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 7060
+      },
+      "warning": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 1044
+      },
+      "high": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 589
+      }
+    },
+    "confusion_matrix": [
+      [
+        10727,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        7060,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        1044,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        589
+      ]
+    ]
+  },
+  "pseudo_label": {
+    "used": true,
+    "target": "noise_risk_level",
+    "is_ground_truth": false,
+    "description": "Internal alert-rule pseudo-label, not legal or externally verified ground truth."
+  },
+  "legal_caution": "This model is not a legal noise violation detector. It reproduces current internal alert-rule pseudo-labels.",
+  "artifacts": {
+    "model_pickle": "ai\\artifacts\\lgbm_noise_risk_feature_spec_2_0_0_base.pkl",
+    "metadata_json": "ai\\artifacts\\lgbm_noise_risk_feature_spec_2_0_0_base.metadata.json",
+    "label_map_json": "ai\\artifacts\\lgbm_noise_risk_feature_spec_2_0_0_base.label_map.json",
+    "training_report_md": "ai\\artifacts\\reports\\lgbm_feature_spec_2_0_0_training_report.md",
+    "confusion_matrix_csv": "ai\\artifacts\\reports\\lgbm_feature_spec_2_0_0_confusion_matrix.csv",
+    "feature_importance_csv": "ai\\artifacts\\reports\\lgbm_feature_spec_2_0_0_feature_importance.csv",
+    "pattern_validation_report_md": "ai\\artifacts\\reports\\pattern_event_validation_report.md",
+    "mismatch_cases_csv": "ai\\artifacts\\reports\\pattern_validation_mismatch_cases.csv"
+  }
+}

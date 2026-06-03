@@ -20,6 +20,7 @@ def _event(
     ts: str,
     accel_delta: float = 0.0,
     recent_count_10min: int = 0,
+    impact_count_in_window: int = 0,
 ) -> EventFeatures:
     return EventFeatures(
         device_id="SENSOR-A101-01",
@@ -30,6 +31,7 @@ def _event(
         accel_delta=accel_delta,
         timestamp=datetime.fromisoformat(ts),
         recent_count_10min=recent_count_10min,
+        impact_count_in_window=impact_count_in_window,
     )
 
 
@@ -66,15 +68,16 @@ class _FakeRuntime:
 
 
 def test_background_noise_classification() -> None:
-    event = _event(38.0, 80, 1200, "2026-05-04T14:10:00+09:00")
+    event = _event(38.0, 8, 1200, "2026-05-04T14:10:00+09:00")
     result = classify_event(event)
     assert result.event_type == "background_noise"
     assert result.severity == "low"
     assert result.is_meaningful is False
+    assert result.noise_risk_level == "normal"
 
 
 def test_daily_noise_classification() -> None:
-    event = _event(52.0, 120, 6000, "2026-05-04T20:10:00+09:00")
+    event = _event(52.0, 8, 6000, "2026-05-04T20:10:00+09:00")
     result = classify_event(event)
     assert result.event_type == "daily_noise"
     assert result.severity in {"low", "medium"}
@@ -89,31 +92,32 @@ def test_impact_noise_high_severity() -> None:
     assert result.is_meaningful is True
 
 
-def test_repeated_vibration_classification_with_meaningful_count() -> None:
+def test_repeated_vibration_classification_with_impact_window_count() -> None:
     event = _event(
-        48.0,
-        420,
+        38.0,
+        60,
         3000,
         "2026-05-04T23:20:00+09:00",
         accel_delta=0.02,
-        recent_count_10min=3,
+        impact_count_in_window=3,
     )
     result = classify_event(event)
     assert result.event_type == "repeated_vibration"
     assert result.severity in {"medium", "high"}
     assert result.is_meaningful is True
+    assert result.impact_count == 3
 
 
 def test_repeated_vibration_not_triggered_by_raw_influx_without_meaningful_count() -> None:
-    # Even if many raw samples exist upstream, classifier only accepts meaningful
-    # recent_count_10min contract. Zero means no repeated-vibration trigger.
+    # Ten-minute context alone must not trigger repeated vibration; the short
+    # impact window is the repeated-impact signal.
     event = _event(
-        48.0,
-        420,
+        38.0,
+        60,
         3000,
         "2026-05-04T23:20:00+09:00",
         accel_delta=0.02,
-        recent_count_10min=0,
+        recent_count_10min=5,
     )
     result = classify_event(event)
     assert result.event_type != "repeated_vibration"
@@ -121,8 +125,8 @@ def test_repeated_vibration_not_triggered_by_raw_influx_without_meaningful_count
 
 def test_airborne_threshold_differs_between_day_and_night() -> None:
     # 41dB is below day airborne(45) but above night airborne(40).
-    day_event = _event(41.0, 100, 1200, "2026-05-04T21:30:00+09:00")
-    night_event = _event(41.0, 100, 3200, "2026-05-04T23:30:00+09:00")
+    day_event = _event(41.0, 8, 1200, "2026-05-04T21:30:00+09:00")
+    night_event = _event(41.0, 8, 3200, "2026-05-04T23:30:00+09:00")
 
     day_result = classify_event(day_event)
     night_result = classify_event(night_event)
@@ -150,7 +154,7 @@ def test_lightgbm_backend_falls_back_to_rule_on_runtime_fallback() -> None:
         3000,
         "2026-05-04T23:20:00+09:00",
         accel_delta=0.02,
-        recent_count_10min=3,
+        impact_count_in_window=3,
     )
     runtime = _FakeRuntime(
         LGBMInferenceResult(
@@ -202,7 +206,7 @@ def test_hybrid_backend_uses_lgbm_prediction_when_available() -> None:
     assert result.is_meaningful is True
 
 
-def test_impact_rule_backup_skips_lgbm_even_in_hybrid() -> None:
+def test_legacy_event_type_lightgbm_keeps_rule_impact_backup() -> None:
     event = _event(
         63.0,
         720,
@@ -227,7 +231,52 @@ def test_impact_rule_backup_skips_lgbm_even_in_hybrid() -> None:
         settings=_settings_with_backend("hybrid"),
         runtime=runtime,
     )
-    assert runtime.calls == 0
+    assert runtime.calls == 1
     assert result.event_type == "impact_noise"
     assert "impact_rule_backup" in result.rule_hits
     assert result.features["classifier_backend"] == "hybrid/rule_impact_backup"
+
+
+def test_lightgbm_backend_uses_noise_risk_model_prediction_without_fallback() -> None:
+    event = _event(
+        58.0,
+        1007.0,
+        2000,
+        "2026-05-11T22:00:00+09:00",
+        impact_count_in_window=3,
+    )
+    runtime = _FakeRuntime(
+        LGBMInferenceResult(
+            should_fallback=False,
+            reason=None,
+            noise_risk_level="high",
+            noise_risk_probability=0.98,
+            noise_risk_probabilities={
+                "normal": 0.01,
+                "caution": 0.0,
+                "warning": 0.01,
+                "high": 0.98,
+            },
+            prediction_path="lightgbm",
+            model_version="lgbm_noise_risk_feature_spec_2_0_0_base",
+            feature_spec_version="2.0.0",
+            model_path="./ai/artifacts/lgbm_noise_risk_feature_spec_2_0_0_base.pkl",
+            metadata_path="./ai/artifacts/lgbm_noise_risk_feature_spec_2_0_0_base.metadata.json",
+            label_map_path="./ai/artifacts/lgbm_noise_risk_feature_spec_2_0_0_base.label_map.json",
+        )
+    )
+
+    result = classify_event(
+        event,
+        settings=_settings_with_backend("lightgbm"),
+        runtime=runtime,
+    )
+
+    assert runtime.calls == 1
+    assert result.noise_risk_level == "high"
+    assert result.confidence == 0.98
+    assert result.features["classifier_backend"] == "lgbm_noise_risk"
+    assert result.features["prediction_path"] == "lightgbm"
+    assert result.features["feature_spec_version"] == "2.0.0"
+    assert result.features["model_version"] == "lgbm_noise_risk_feature_spec_2_0_0_base"
+    assert result.features["lgbm_noise_risk_probabilities"]["high"] == 0.98

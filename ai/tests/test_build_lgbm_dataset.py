@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from ai.training.build_lgbm_dataset import build_lgbm_dataset
+from ai.training.build_lgbm_dataset import build_lgbm_dataset, build_sensor_feature_dataset
 
 
 def _write_csv(path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
@@ -259,3 +259,118 @@ def test_build_lgbm_dataset_duplicate_noise_key_raises() -> None:
             noise_csv=noise_csv,
             out_csv=out_csv,
         )
+
+
+def test_build_lgbm_dataset_uses_timestamp_for_derived_time_when_sensor_timestamp_missing() -> None:
+    case_dir = _case_dir()
+    sensor_csv = case_dir / "all_sensor_readings.csv"
+    noise_csv = case_dir / "all_noise_events.csv"
+    out_csv = case_dir / "lgbm_training_dataset.csv"
+
+    sensor_rows = [
+        {
+            "id": "1",
+            "sensor_id": "SENSOR-A101-01",
+            "household_id": "1",
+            "sound_level": "45.2",
+            "vibration_value": "1007.0",
+            "duration_ms": "2000",
+            "timestamp": "2026-05-11T22:00:00",
+            "received_at": "2026-05-11T22:00:01",
+        }
+    ]
+    noise_rows = [
+        {
+            "id": "11",
+            "sensor_id": "SENSOR-A101-01",
+            "household_id": "1",
+            "event_type": "daily_noise",
+            "severity": "medium",
+            "started_at": "2026-05-11 22:00:00",
+        }
+    ]
+
+    _write_csv(sensor_csv, sensor_rows, list(sensor_rows[0].keys()))
+    _write_csv(noise_csv, noise_rows, list(noise_rows[0].keys()))
+
+    build_lgbm_dataset(sensor_csv=sensor_csv, noise_csv=noise_csv, out_csv=out_csv)
+
+    with out_csv.open("r", encoding="utf-8", newline="") as f:
+        out_rows = list(csv.DictReader(f))
+
+    assert out_rows[0]["is_nighttime"] == "1"
+    assert out_rows[0]["is_daytime"] == "0"
+    assert out_rows[0]["vibration_level_category"] == "impact_risk"
+
+
+def test_build_sensor_feature_dataset_preserves_float_raw_and_pseudo_labels() -> None:
+    case_dir = _case_dir()
+    sensor_csv = case_dir / "sensor_readings.csv"
+    out_csv = case_dir / "training_dataset_feature_spec_2_0_0.csv"
+    out_metadata = case_dir / "training_dataset_feature_spec_2_0_0.metadata.json"
+
+    sensor_rows = [
+        {
+            "id": "1",
+            "sensor_id": "SENSOR-A101-01",
+            "household_id": "1",
+            "sound_level": "35.0",
+            "vibration_value": "19.3",
+            "duration_ms": "2000",
+            "received_at": "2026-05-11T22:00:00",
+            "sensor_timestamp": "2026-05-11T22:00:00",
+        },
+        {
+            "id": "2",
+            "sensor_id": "SENSOR-A101-01",
+            "household_id": "1",
+            "sound_level": "35.0",
+            "vibration_value": "19.3",
+            "duration_ms": "2000",
+            "received_at": "2026-05-11T22:00:04",
+            "sensor_timestamp": "2026-05-11T22:00:04",
+        },
+        {
+            "id": "3",
+            "sensor_id": "SENSOR-A101-01",
+            "household_id": "1",
+            "sound_level": "35.0",
+            "vibration_value": "19.3",
+            "duration_ms": "2000",
+            "received_at": "2026-05-11T22:00:08",
+            "sensor_timestamp": "2026-05-11T22:00:08",
+        },
+        {
+            "id": "4",
+            "sensor_id": "SENSOR-B202-01",
+            "household_id": "2",
+            "sound_level": "35.0",
+            "vibration_value": "19.3",
+            "duration_ms": "2000",
+            "received_at": "2026-05-11T22:00:08",
+            "sensor_timestamp": "2026-05-11T22:00:08",
+        },
+    ]
+
+    _write_csv(sensor_csv, sensor_rows, list(sensor_rows[0].keys()))
+
+    metadata = build_sensor_feature_dataset(
+        sensor_csv=sensor_csv,
+        out_csv=out_csv,
+        out_metadata=out_metadata,
+    )
+
+    with out_csv.open("r", encoding="utf-8", newline="") as f:
+        out_rows = list(csv.DictReader(f))
+
+    assert out_rows[0]["vibration_raw"] == "19.3"
+    assert out_rows[0]["vibration_level_category"] == "caution"
+    assert out_rows[2]["impact_count_in_window"] == "3"
+    assert out_rows[2]["repeated_impact_flag"] == "1"
+    assert out_rows[2]["noise_risk_level"] == "caution"
+    assert out_rows[2]["feature_spec_version"] == "2.0.0"
+    assert out_rows[3]["impact_count_in_window"] == "1"
+    assert out_rows[3]["repeated_impact_flag"] == "0"
+    assert metadata["feature_spec_version"] == "2.0.0"
+    assert metadata["vibration_raw_fractional_count"] == 4
+    assert out_metadata.exists()

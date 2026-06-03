@@ -15,6 +15,7 @@ from ai.ml_features import (
     write_feature_spec,
 )
 from ai.schemas import EventFeatures
+from ai.vibration import VIBRATION_LEVEL_CATEGORY_CODES, vibration_raw_to_acc_mps2
 
 
 def _case_dir() -> Path:
@@ -59,11 +60,18 @@ def test_feature_values_respect_thresholds_and_night_window() -> None:
     )
     features = feature_dict_from_event(event)
 
-    assert features["is_night"] == 1.0
+    assert features["is_nighttime"] == 1.0
+    assert features["is_daytime"] == 0.0
     assert features["hour_of_day"] == 23.0
     assert features["sound_over_airborne_leq"] == 1.0
     assert features["sound_over_impact_lmax"] == 0.0
-    assert features["vibration_over_mid"] == 10.0
+    assert features["vibration_raw"] == 360.0
+    assert features["vibration_acc_mps2"] == vibration_raw_to_acc_mps2(360)
+    assert features["vibration_level_category"] == float(
+        VIBRATION_LEVEL_CATEGORY_CODES["impact_risk"]
+    )
+    assert features["impact_count_in_window"] == 1.0
+    assert features["repeated_impact_flag"] == 0.0
     assert features["duration_over_medium_ms"] == 1000.0
 
 
@@ -88,9 +96,11 @@ def test_sensor_row_parsing_handles_missing_and_nan_values() -> None:
     assert event.duration_ms == 0
     assert event.accel_delta == 0.0
     assert event.recent_count_10min == 0
-    assert event.timestamp == datetime.fromisoformat("2026-05-13 12:01:02.000000")
+    assert event.timestamp == datetime.fromisoformat("2026-05-13T12:01:02+09:00")
+    assert event.timestamp_source == "sensor_timestamp"
     assert features["sound_level"] == 0.0
-    assert features["vibration_value"] == 0.0
+    assert features["vibration_raw"] == 0.0
+    assert features["vibration_acc_mps2"] == 0.005
     assert features["duration_ms"] == 0.0
 
 
@@ -110,6 +120,39 @@ def test_payload_and_event_conversion_match() -> None:
     from_event = feature_dict_from_event(event)
 
     assert from_payload == from_event
+
+
+def test_sensor_row_timestamp_priority_and_conflict_metadata() -> None:
+    event = event_features_from_sensor_row(
+        {
+            "sensor_id": "SENSOR-A101-01",
+            "sound_level": 45.2,
+            "vibration_value": 1007,
+            "duration_ms": 2000,
+            "sensor_timestamp": "2026-05-11T22:00:00",
+            "timestamp": "2026-05-11T21:59:00",
+        }
+    )
+
+    assert event.timestamp.isoformat() == "2026-05-11T22:00:00+09:00"
+    assert event.timestamp_source == "sensor_timestamp"
+    assert event.timestamp_conflict is True
+
+
+def test_sensor_row_preserves_fractional_vibration_raw() -> None:
+    event = event_features_from_sensor_row(
+        {
+            "sensor_id": "SENSOR-A101-01",
+            "sound_level": 45.2,
+            "vibration_value": "10.8",
+            "duration_ms": 2000,
+            "sensor_timestamp": "2026-05-11T22:00:00",
+        }
+    )
+    features = feature_dict_from_event(event)
+
+    assert event.vibration_value == 10.8
+    assert features["vibration_raw"] == 10.8
 
 
 def test_feature_spec_json_output() -> None:
